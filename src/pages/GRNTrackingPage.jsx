@@ -4,8 +4,9 @@ import { Trash2, Plus } from 'lucide-react'
 import { useEmployees } from '../context/EmployeesContext'
 import { useWarehouses } from '../context/WarehousesContext'
 import { formatDate, toInputDate, parseDate } from '../utils/dateFormat'
-import { fetchInvoices, insertInvoice, updateInvoice, deleteInvoice } from '../api/invoices'
-import DeliverySlotModal from '../components/DeliverySlotModal'
+import { fetchGRNs, insertGRN, updateGRN, deleteGRN } from '../api/grn'
+import { fetchInvoices, updateInvoice } from '../api/invoices'
+import DeliveryTimeAndAttachmentModal from '../components/DeliveryTimeAndAttachmentModal'
 import DiscrepancyModal from '../components/DiscrepancyModal'
 import SelectSalesmanModal from '../components/SelectSalesmanModal'
 import SelectClerkModal from '../components/SelectClerkModal'
@@ -78,11 +79,12 @@ const PHASE_4_LOCKED_MSG = 'This Status can no longer be changed as the order ha
 
 const defaultDiscrepancy = () => ({ checked: false, title: '', description: '' })
 
-function createInvoice(overrides = {}) {
+function createGRN(overrides = {}) {
   return {
     id: String(Date.now() + Math.random()),
-    invoiceNo: '',
-    dateOfInvoice: '',
+    grnNo: '',
+    grnDate: '',
+    numberAndDateLocked: false,
     status: 'Billed',
     assignedDriverId: null,
     assignedSalesmanId: null,
@@ -99,15 +101,26 @@ function createInvoice(overrides = {}) {
   }
 }
 
-export default function InvoiceTrackingPage() {
+export default function GRNTrackingPage() {
   const { employees } = useEmployees()
   const { warehouses } = useWarehouses()
   const drivers = employees.filter((e) => e.position === 'Lorry Driver')
   const salesmen = employees.filter((e) => e.position === 'Salesman')
   const [testMode, setTestMode] = useState(false)
-  const [invoices, setInvoices] = useState([])
-  const [invoicesLoading, setInvoicesLoading] = useState(true)
-  const [deliveryModal, setDeliveryModal] = useState({ open: false, rowId: null, dateLabel: '' })
+  const [grns, setGrns] = useState([])
+  const [grnsLoading, setGrnsLoading] = useState(true)
+  const [addGRNFormOpen, setAddGRNFormOpen] = useState(false)
+  const [addGRNMultiple, setAddGRNMultiple] = useState(false)
+  const [addGRNRows, setAddGRNRows] = useState([{ grnNo: '', grnDate: '' }])
+  const [addGRNApplyDateToAll, setAddGRNApplyDateToAll] = useState(false)
+  const [addGRNConfirmOpen, setAddGRNConfirmOpen] = useState(false)
+  const [overwriteGRNModal, setOverwriteGRNModal] = useState({
+    open: false,
+    conflicts: [],
+    nonConflicting: [],
+    index: 0,
+  })
+  const [deliveryModal, setDeliveryModal] = useState({ open: false, rowId: null, dateLabel: '', skipTimeStep: false })
   const [discrepancyModal, setDiscrepancyModal] = useState({
     open: false,
     rowId: null,
@@ -115,7 +128,7 @@ export default function InvoiceTrackingPage() {
     description: '',
   })
   const [datePickerRow, setDatePickerRow] = useState(null)
-  const [invoiceDatePickerRow, setInvoiceDatePickerRow] = useState(null)
+  const [grnDatePickerRow, setGRNDatePickerRow] = useState(null)
   const [salesmanModal, setSalesmanModal] = useState({ open: false, rowId: null, previousStatus: '' })
   const [clerkModal, setClerkModal] = useState({ open: false, rowId: null, previousStatus: '' })
   const [warehouseModal, setWarehouseModal] = useState({ open: false, rowId: null, previousStatus: '' })
@@ -182,6 +195,16 @@ export default function InvoiceTrackingPage() {
     payload: null,
     onApplied: null,
   })
+  const [invoiceSearchModal, setInvoiceSearchModal] = useState({
+    open: false,
+    forRowId: null,
+    attachmentType: 'original',
+    deliveryOrderRow: null,
+  })
+  const [invoiceSearchQuery, setInvoiceSearchQuery] = useState('')
+  const [invoiceSearchSelectedId, setInvoiceSearchSelectedId] = useState(null)
+  const [invoiceSearchList, setInvoiceSearchList] = useState([])
+  const [invoiceAttachedNotice, setInvoiceAttachedNotice] = useState({ open: false, message: '' })
   const assignDatePendingRef = useRef({
     rowId: null,
     fromDriver: false,
@@ -190,74 +213,74 @@ export default function InvoiceTrackingPage() {
   })
   const pendingBulkRowIdsRef = useRef(null)
 
-  const loadInvoices = useCallback(async () => {
-    setInvoicesLoading(true)
+  const loadGRNs = useCallback(async () => {
+    setGrnsLoading(true)
     try {
-      const data = await fetchInvoices()
+      const data = await fetchGRNs()
       if (data.length === 0) {
         const samples = [
-          createInvoice({ invoiceNo: 'INV-001', dateOfInvoice: '2025-02-20' }),
-          createInvoice({ invoiceNo: 'INV-002', dateOfInvoice: '2025-02-21' }),
-          createInvoice({ invoiceNo: 'INV-003', dateOfInvoice: '2025-02-22' }),
-          createInvoice({ invoiceNo: 'INV-004', dateOfInvoice: '2025-02-23' }),
-          createInvoice({ invoiceNo: 'INV-005', dateOfInvoice: '2025-02-24' }),
+          createGRN({ grnNo: 'GRN-001', grnDate: '2025-02-20' }),
+          createGRN({ grnNo: 'GRN-002', grnDate: '2025-02-21' }),
+          createGRN({ grnNo: 'GRN-003', grnDate: '2025-02-22' }),
+          createGRN({ grnNo: 'GRN-004', grnDate: '2025-02-23' }),
+          createGRN({ grnNo: 'GRN-005', grnDate: '2025-02-24' }),
         ]
         const inserted = []
         for (const row of samples) {
-          const saved = await insertInvoice(row)
+          const saved = await insertGRN(row)
           inserted.push(saved)
         }
-        setInvoices(inserted)
+        setGrns(inserted)
       } else {
-        setInvoices(data)
+        setGrns(data)
       }
     } catch (e) {
-      console.error('Fetch invoices error:', e)
+      console.error('Fetch GRN error:', e)
       try {
         const samples = [
-          createInvoice({ invoiceNo: 'INV-001', dateOfInvoice: '2025-02-20' }),
-          createInvoice({ invoiceNo: 'INV-002', dateOfInvoice: '2025-02-21' }),
-          createInvoice({ invoiceNo: 'INV-003', dateOfInvoice: '2025-02-22' }),
-          createInvoice({ invoiceNo: 'INV-004', dateOfInvoice: '2025-02-23' }),
-          createInvoice({ invoiceNo: 'INV-005', dateOfInvoice: '2025-02-24' }),
+          createGRN({ grnNo: 'GRN-001', grnDate: '2025-02-20' }),
+          createGRN({ grnNo: 'GRN-002', grnDate: '2025-02-21' }),
+          createGRN({ grnNo: 'GRN-003', grnDate: '2025-02-22' }),
+          createGRN({ grnNo: 'GRN-004', grnDate: '2025-02-23' }),
+          createGRN({ grnNo: 'GRN-005', grnDate: '2025-02-24' }),
         ]
         const inserted = []
         for (const row of samples) {
-          const saved = await insertInvoice(row)
+          const saved = await insertGRN(row)
           inserted.push(saved)
         }
-        setInvoices(inserted)
+        setGrns(inserted)
       } catch (e2) {
-        setInvoices([
-          createInvoice({ invoiceNo: 'INV-001', dateOfInvoice: '2025-02-20' }),
-          createInvoice({ invoiceNo: 'INV-002', dateOfInvoice: '2025-02-21' }),
-          createInvoice({ invoiceNo: 'INV-003', dateOfInvoice: '2025-02-22' }),
-          createInvoice({ invoiceNo: 'INV-004', dateOfInvoice: '2025-02-23' }),
-          createInvoice({ invoiceNo: 'INV-005', dateOfInvoice: '2025-02-24' }),
+        setGrns([
+          createGRN({ grnNo: 'GRN-001', grnDate: '2025-02-20' }),
+          createGRN({ grnNo: 'GRN-002', grnDate: '2025-02-21' }),
+          createGRN({ grnNo: 'GRN-003', grnDate: '2025-02-22' }),
+          createGRN({ grnNo: 'GRN-004', grnDate: '2025-02-23' }),
+          createGRN({ grnNo: 'GRN-005', grnDate: '2025-02-24' }),
         ])
       }
     }
-    setInvoicesLoading(false)
+    setGrnsLoading(false)
   }, [])
 
   useEffect(() => {
-    loadInvoices()
-  }, [loadInvoices])
+    loadGRNs()
+  }, [loadGRNs])
 
   const updateRow = (id, updates) => {
-    setInvoices((prev) => {
+    setGrns((prev) => {
       const next = prev.map((row) => (row.id === id ? { ...row, ...updates } : row))
       const row = next.find((r) => r.id === id)
       if (!row) return next
       // Local storage: always persist (no testMode gate)
       if (isLocalId(id)) {
-        updateInvoice(id, row).catch((e) => console.error('Update invoice error:', e))
+        updateGRN(id, row).catch((e) => console.error('Update GRN error:', e))
       } else {
-        insertInvoice(row)
+        insertGRN(row)
           .then((inserted) => {
-            setInvoices((p) => p.map((r) => (r.id === id ? inserted : r)))
+            setGrns((p) => p.map((r) => (r.id === id ? inserted : r)))
           })
-          .catch((e) => console.error('Insert invoice error:', e))
+          .catch((e) => console.error('Insert GRN error:', e))
       }
       return next
     })
@@ -265,9 +288,9 @@ export default function InvoiceTrackingPage() {
 
   const deleteRow = (id) => {
     if (!testMode) return
-    deleteInvoice(id)
-      .then(() => setInvoices((prev) => prev.filter((row) => row.id !== id)))
-      .catch((e) => console.error('Delete invoice error:', e))
+    deleteGRN(id)
+      .then(() => setGrns((prev) => prev.filter((row) => row.id !== id)))
+      .catch((e) => console.error('Delete GRN error:', e))
   }
 
   const isBulkApply = () => {
@@ -313,45 +336,118 @@ export default function InvoiceTrackingPage() {
     const parsed = parseDate(value)
     if (!parsed) return
     setDatePickerRow(null)
-    const row = invoices.find((r) => r.id === rowId)
+    const row = grns.find((r) => r.id === rowId)
     const isHoldOrChopSign =
       row?.status?.startsWith('Hold -') || row?.status?.startsWith('Chop & Sign -')
     if (isHoldOrChopSign) {
       updateRow(rowId, { deliveryDate: parsed, deliverySlot: '' })
       return
     }
-    setDeliveryModal({ open: true, rowId, dateLabel: formatDate(parsed) })
+    setDeliveryModal({ open: true, rowId, dateLabel: formatDate(parsed), skipTimeStep: false })
     updateRow(rowId, { deliveryDate: parsed, deliverySlot: '' })
   }
 
-  const handleInvoiceDateChange = (rowId, value) => {
+  const handleGRNDateChange = (rowId, value) => {
     const parsed = parseDate(value)
-    if (parsed) updateRow(rowId, { dateOfInvoice: parsed })
-    setInvoiceDatePickerRow(null)
+    if (parsed) updateRow(rowId, { grnDate: parsed })
+    setGRNDatePickerRow(null)
   }
 
-  const handleDeliverySlotSelect = (slot) => {
-    if (!deliveryModal.rowId) return
-    const displaySlot = slot === 'Afternoon' ? 'Noon' : slot
-    const row = invoices.find((r) => r.id === deliveryModal.rowId)
-    const payload = row
-      ? {
-          status: row.status,
-          assignedSalesmanId: row.assignedSalesmanId,
-          assignedDriverId: row.assignedDriverId,
-          deliveryDate: row?.deliveryDate ?? '',
-          deliverySlot: displaySlot,
-        }
-      : { deliverySlot: displaySlot, deliveryDate: '' }
-    updateRow(deliveryModal.rowId, payload)
-    afterBulkableCommit(deliveryModal.rowId, payload, () =>
-      setDeliveryModal({ open: false, rowId: null, dateLabel: '' })
+  const handleDeliveryTimeAndAttachmentComplete = ({ slot, attachmentType: type }) => {
+    const rowId = deliveryModal.rowId
+    if (!rowId) {
+      setDeliveryModal({ open: false, rowId: null, dateLabel: '', skipTimeStep: false })
+      return
+    }
+    const row = grns.find((r) => r.id === rowId)
+    if (slot != null) {
+      const displaySlot = slot === 'Afternoon' ? 'Noon' : slot
+      const payload = row
+        ? {
+            status: row.status,
+            assignedSalesmanId: row.assignedSalesmanId,
+            assignedDriverId: row.assignedDriverId,
+            deliveryDate: row?.deliveryDate ?? '',
+            deliverySlot: displaySlot,
+          }
+        : { deliverySlot: displaySlot, deliveryDate: '' }
+      updateRow(rowId, payload)
+      afterBulkableCommit(rowId, payload, () => {})
+    }
+    setDeliveryModal({ open: false, rowId: null, dateLabel: '', skipTimeStep: false })
+    if (type === 'none') return
+    const grnRow = grns.find((r) => r.id === rowId)
+    fetchInvoices().then((list) => {
+      setInvoiceSearchList(list)
+      setInvoiceSearchQuery('')
+      setInvoiceSearchSelectedId(null)
+      setInvoiceSearchModal({
+        open: true,
+        forRowId: rowId,
+        attachmentType: type,
+        deliveryOrderRow: grnRow || null,
+      })
+    })
+  }
+
+  const getFilteredInvoicesForSearch = () => {
+    const q = (invoiceSearchQuery || '').trim().toLowerCase()
+    if (!q) return invoiceSearchList
+    return invoiceSearchList.filter(
+      (inv) => (inv.invoiceNo || '').toLowerCase().includes(q)
     )
+  }
+
+  const handleInvoiceSearchConfirm = async () => {
+    const { forRowId, attachmentType: type, deliveryOrderRow } = invoiceSearchModal
+    if (!forRowId || !deliveryOrderRow) {
+      setInvoiceSearchModal({ open: false, forRowId: null, attachmentType: 'original', deliveryOrderRow: null })
+      setInvoiceSearchList([])
+      return
+    }
+    const filtered = getFilteredInvoicesForSearch()
+    const selectedInvoice = invoiceSearchSelectedId
+      ? invoiceSearchList.find((r) => r.id === invoiceSearchSelectedId)
+      : filtered.length === 1 ? filtered[0] : null
+    if ((type === 'original' || type === 'copy') && !selectedInvoice) return
+    const invoiceNo = selectedInvoice?.invoiceNo || selectedInvoice?.id
+    if (type === 'original' && selectedInvoice) {
+      await updateInvoice(selectedInvoice.id, {
+        status: deliveryOrderRow.status,
+        assignedDriverId: deliveryOrderRow.assignedDriverId,
+        assignedSalesmanId: deliveryOrderRow.assignedSalesmanId,
+        deliveryDate: deliveryOrderRow.deliveryDate || '',
+        deliverySlot: deliveryOrderRow.deliverySlot || '',
+      })
+      setInvoiceAttachedNotice({
+        open: true,
+        message: `Invoice ${invoiceNo} has been updated with GRN ${deliveryOrderRow.grnNo || forRowId}.`,
+      })
+    }
+    if (type === 'copy' && selectedInvoice) {
+      const row = grns.find((r) => r.id === forRowId)
+      const currentRemark = (row?.remark || '').trim()
+      const newRemark = currentRemark
+        ? `${currentRemark} / Refer Invoice ${invoiceNo}`
+        : `Refer Invoice ${invoiceNo}`
+      updateRow(forRowId, { remark: newRemark })
+    }
+    setInvoiceSearchModal({ open: false, forRowId: null, attachmentType: 'original', deliveryOrderRow: null })
+    setInvoiceSearchList([])
+    setInvoiceSearchQuery('')
+    setInvoiceSearchSelectedId(null)
+  }
+
+  const handleInvoiceSearchCancel = () => {
+    setInvoiceSearchModal({ open: false, forRowId: null, attachmentType: 'original', deliveryOrderRow: null })
+    setInvoiceSearchList([])
+    setInvoiceSearchQuery('')
+    setInvoiceSearchSelectedId(null)
   }
 
   const handleDiscrepancyCheck = (rowId, checked) => {
     if (checked) {
-      const row = invoices.find((r) => r.id === rowId)
+      const row = grns.find((r) => r.id === rowId)
       updateRow(rowId, { discrepancy: { ...row.discrepancy, checked: true } })
       setDiscrepancyModal({
         open: true,
@@ -377,7 +473,7 @@ export default function InvoiceTrackingPage() {
   }
 
   const handleStatusChange = (rowId, newStatus, previousStatus) => {
-    const row = invoices.find((r) => r.id === rowId)
+    const row = grns.find((r) => r.id === rowId)
     if (newStatus === row.status) {
       setSameStatusConfirmModal({ open: true, rowId, status: newStatus })
       return
@@ -486,7 +582,7 @@ export default function InvoiceTrackingPage() {
   const handleSalesmanSelect = (rowId, salesmanId) => {
     updateRow(rowId, { assignedSalesmanId: salesmanId })
     setSalesmanModal({ open: false, rowId: null, previousStatus: '' })
-    const row = invoices.find((r) => r.id === rowId)
+    const row = grns.find((r) => r.id === rowId)
     assignDatePendingRef.current = { rowId, fromDriver: false }
     setAssignDateModal({
       open: true,
@@ -504,7 +600,7 @@ export default function InvoiceTrackingPage() {
   const handleClerkSelect = (rowId, clerkId) => {
     updateRow(rowId, { assignedClerkId: clerkId })
     setClerkModal({ open: false, rowId: null, previousStatus: '' })
-    const row = invoices.find((r) => r.id === rowId)
+    const row = grns.find((r) => r.id === rowId)
     assignDatePendingRef.current = { rowId, fromDriver: false }
     setAssignDateModal({
       open: true,
@@ -572,7 +668,7 @@ export default function InvoiceTrackingPage() {
       fromChopSignWarehouse: false,
       fromChopSignNoFlow: { rowId, warehouseId },
     }
-    const row = invoices.find((r) => r.id === rowId)
+    const row = grns.find((r) => r.id === rowId)
     setAssignDateModal({
       open: true,
       rowId,
@@ -587,7 +683,7 @@ export default function InvoiceTrackingPage() {
 
   const handleHoldWarehouseTypeSelect = (type) => {
     const { rowId, warehouseId } = holdWarehouseTypeModal
-    const row = invoices.find((r) => r.id === rowId)
+    const row = grns.find((r) => r.id === rowId)
     const currentRemark = row?.remark?.trim() || ''
     const newRemark = currentRemark ? `${currentRemark} / ${type}` : type
     const payload = {
@@ -661,7 +757,7 @@ export default function InvoiceTrackingPage() {
 
   const handleBacktrackPhase2To1Yes = () => {
     const { rowId } = backtrackPhase2To1Modal
-    const row = invoices.find((r) => r.id === rowId)
+    const row = grns.find((r) => r.id === rowId)
     const payload = rowId && row ? {
       status: 'Billed',
       assignedDriverId: null,
@@ -736,7 +832,7 @@ export default function InvoiceTrackingPage() {
       setPhase4BacktrackModal({ open: false, rowId: null, newStatus: '', previousStatus: '' })
       return
     }
-    const row = invoices.find((r) => r.id === rowId)
+    const row = grns.find((r) => r.id === rowId)
     const resetPayload = {
       status: newStatus,
       assignedDriverId: null,
@@ -816,7 +912,7 @@ export default function InvoiceTrackingPage() {
       if (rowIdToUse) {
         if (fromChopSignNoFlow) {
           const { warehouseId } = fromChopSignNoFlow
-          const row = invoices.find((r) => r.id === rowIdToUse)
+          const row = grns.find((r) => r.id === rowIdToUse)
           const currentRemark = row?.remark?.trim() || ''
           const newRemark = currentRemark ? `${currentRemark} / Chop & Sign` : 'Chop & Sign'
           const payload = {
@@ -833,7 +929,7 @@ export default function InvoiceTrackingPage() {
           return
         }
         if (fromChopSignWarehouse) {
-          const row = invoices.find((r) => r.id === rowIdToUse)
+          const row = grns.find((r) => r.id === rowIdToUse)
           const currentRemark = row?.remark?.trim() || ''
           const newRemark = currentRemark ? `${currentRemark} / Chop & Sign` : 'Chop & Sign'
           const payload = {
@@ -848,9 +944,9 @@ export default function InvoiceTrackingPage() {
         }
         updateRow(rowIdToUse, { deliveryDate: dateToSave, deliverySlot: '' })
         if (fromDriver) {
-          setDeliveryModal({ open: true, rowId: rowIdToUse, dateLabel: formatDate(dateToSave) })
+          setDeliveryModal({ open: true, rowId: rowIdToUse, dateLabel: formatDate(dateToSave), skipTimeStep: false })
         } else {
-          const leadRow = invoices.find((r) => r.id === rowIdToUse)
+          const leadRow = grns.find((r) => r.id === rowIdToUse)
           const payload = leadRow
             ? {
                 status: leadRow.status,
@@ -861,6 +957,7 @@ export default function InvoiceTrackingPage() {
               }
             : { deliveryDate: dateToSave, deliverySlot: '' }
           afterBulkableCommit(rowIdToUse, payload, () => {})
+          setDeliveryModal({ open: true, rowId: rowIdToUse, dateLabel: '', skipTimeStep: true })
         }
       }
     } catch (e) {
@@ -898,7 +995,7 @@ export default function InvoiceTrackingPage() {
     const fromChopSignWarehouse = driverModal.fromChopSignWarehouse
     updateRow(rowId, { assignedDriverId: driverId })
     setDriverModal({ open: false, rowId: null, previousStatus: '', fromChopSignWarehouse: false })
-    const row = invoices.find((r) => r.id === rowId)
+    const row = grns.find((r) => r.id === rowId)
     assignDatePendingRef.current = { rowId, fromDriver: true, fromChopSignWarehouse: !!fromChopSignWarehouse }
     setAssignDateModal({
       open: true,
@@ -913,22 +1010,189 @@ export default function InvoiceTrackingPage() {
     setDriverModal({ open: false, rowId: null, previousStatus: '', fromChopSignWarehouse: false })
   }
 
-  const handleAddInvoiceRow = async () => {
-    const newRow = createInvoice({
-      invoiceNo: '',
-      dateOfInvoice: getTodayDateStr(),
-    })
-    try {
-      const inserted = await insertInvoice(newRow)
-      setInvoices((prev) => [...prev, inserted])
-    } catch (e) {
-      console.error('Add invoice row error:', e)
+  const handleAddGRNApplyDateToAllChange = (checked) => {
+    setAddDeliveryOrderApplyDateToAll(checked)
+    if (checked) {
+      const firstDate = addGRNRows[0]?.grnDate || ''
+      setAddGRNRows((prev) => prev.map((r) => ({ ...r, grnDate: firstDate })))
     }
+  }
+  const handleAddGRNMultipleToggle = (on) => {
+    setAddDeliveryOrderMultiple(on)
+    if (on) {
+      const newRows = Array(10).fill(null).map(() => ({ grnNo: '', grnDate: '' }))
+      setAddGRNRows(newRows)
+      setAddDeliveryOrderApplyDateToAll(false)
+    } else {
+      const first = addGRNRows[0] ? { ...addGRNRows[0] } : { grnNo: '', grnDate: '' }
+      setAddGRNRows([first])
+      setAddDeliveryOrderApplyDateToAll(false)
+    }
+  }
+
+  const setAddGRNRow = (index, field, value) => {
+    setAddGRNRows((prev) => {
+      const next = prev.map((r, i) => (i === index ? { ...r, [field]: value } : r))
+      if (addGRNApplyDateToAll && field === 'grnDate' && index === 0) {
+        return next.map((r, i) => (i === 0 ? r : { ...r, grnDate: value }))
+      }
+      return next
+    })
+  }
+
+  const getAddGRNEntries = () => {
+    const firstDate = addGRNApplyDateToAll ? (addGRNRows[0]?.grnDate || '') : null
+    return addGRNRows
+      .map((r) => ({
+        grnNo: r.grnNo?.trim(),
+        grnDate: addGRNApplyDateToAll ? firstDate : (r.grnDate || ''),
+      }))
+      .filter((e) => e.grnNo)
+  }
+
+  const handleAddGRNProceed = () => {
+    const entries = getAddGRNEntries()
+    if (entries.length === 0) return
+    if (addGRNApplyDateToAll && !addGRNRows[0]?.grnDate) return
+    for (const e of entries) {
+      if (!addGRNApplyDateToAll && !e.grnDate) return
+    }
+    setAddDeliveryOrderConfirmOpen(true)
+  }
+
+  const handleAddGRNConfirmYes = async () => {
+    const entries = getAddGRNEntries()
+    const conflicts = []
+    const nonConflicting = []
+    for (const e of entries) {
+      const existing = grns.find((r) => (r.grnNo || '').trim() === (e.grnNo || '').trim())
+      if (existing) conflicts.push({ existingRow: existing, newEntry: e })
+      else nonConflicting.push(e)
+    }
+    if (conflicts.length > 0) {
+      setAddDeliveryOrderConfirmOpen(false)
+      setOverwriteDeliveryOrderModal({ open: true, conflicts, nonConflicting, index: 0 })
+      return
+    }
+    for (const e of nonConflicting) {
+      const newRow = createGRN({ grnNo: e.grnNo, grnDate: e.grnDate })
+      const inserted = await insertGRN(newRow)
+      setGrns((prev) => [...prev, inserted])
+    }
+    setAddDeliveryOrderFormOpen(false)
+    setAddDeliveryOrderConfirmOpen(false)
+    setAddGRNRows([{ grnNo: '', grnDate: '' }])
+    setAddDeliveryOrderApplyDateToAll(false)
+  }
+
+  const getGRNRowDisplay = (row) => {
+    const clerk = row.assignedClerkId ? employees.find((e) => e.id === row.assignedClerkId) : null
+    const salesman = row.assignedSalesmanId ? salesmen.find((s) => s.id === row.assignedSalesmanId) : null
+    const driver = row.assignedDriverId ? drivers.find((d) => d.id === row.assignedDriverId) : null
+    const transferWarehouse = row.transferWarehouseId ? warehouses.find((w) => w.id === row.transferWarehouseId) : null
+    const holdWarehouse = row.holdWarehouseId ? warehouses.find((w) => w.id === row.holdWarehouseId) : null
+    const assignedTo =
+      row.status === 'Preparing Delivery' || row.status === 'Billed'
+        ? 'Unassigned'
+        : row.status === STATUS_TRANSFER && transferWarehouse
+          ? transferWarehouse.name
+          : row.status === 'Hold - Warehouse' && holdWarehouse
+            ? holdWarehouse.name || 'Unassigned'
+            : STATUS_REQUIRES_CLERK.includes(row.status)
+              ? clerk?.name ?? 'Unassigned'
+              : STATUS_REQUIRES_SALESMAN.includes(row.status)
+                ? salesman?.name ?? 'Unassigned'
+                : row.status === 'Delivery In Progress'
+                  ? salesman?.name ?? driver?.name ?? 'Unassigned'
+                  : driver?.name ?? 'Unassigned'
+    const assignedDate =
+      row.deliveryDate && row.deliverySlot
+        ? `${formatDate(row.deliveryDate)} - ${row.deliverySlot}`
+        : row.deliveryDate
+          ? formatDate(row.deliveryDate)
+          : '–'
+    return { status: row.status, assignedTo, assignedDate }
+  }
+
+  const handleOverwriteGRNYes = async () => {
+    const { conflicts, nonConflicting, index } = overwriteGRNModal
+    const { existingRow, newEntry } = conflicts[index]
+    const resetPayload = {
+      grnNo: newEntry.grnNo,
+      grnDate: newEntry.grnDate,
+      status: 'Billed',
+      assignedDriverId: null,
+      assignedSalesmanId: null,
+      assignedClerkId: null,
+      deliveryDate: '',
+      deliverySlot: '',
+      transferWarehouseId: null,
+      holdWarehouseId: null,
+      holdWarehouseType: '',
+    }
+    updateRow(existingRow.id, resetPayload)
+    if (index + 1 < conflicts.length) {
+      setOverwriteDeliveryOrderModal((prev) => ({ ...prev, index: prev.index + 1 }))
+    } else {
+      for (const e of nonConflicting) {
+        const newRow = createGRN({ grnNo: e.grnNo, grnDate: e.grnDate })
+        const inserted = await insertGRN(newRow)
+        setGrns((prev) => [...prev, inserted])
+      }
+      setOverwriteDeliveryOrderModal({ open: false, conflicts: [], nonConflicting: [], index: 0 })
+      setAddDeliveryOrderFormOpen(false)
+      setAddDeliveryOrderConfirmOpen(false)
+      setAddGRNRows([{ grnNo: '', grnDate: '' }])
+      setAddDeliveryOrderApplyDateToAll(false)
+    }
+  }
+
+  const handleOverwriteGRNNo = async () => {
+    const { conflicts, nonConflicting, index } = overwriteGRNModal
+    if (index + 1 < conflicts.length) {
+      setOverwriteDeliveryOrderModal((prev) => ({ ...prev, index: prev.index + 1 }))
+    } else {
+      for (const e of nonConflicting) {
+        const newRow = createGRN({ grnNo: e.grnNo, grnDate: e.grnDate })
+        const inserted = await insertGRN(newRow)
+        setGrns((prev) => [...prev, inserted])
+      }
+      setOverwriteDeliveryOrderModal({ open: false, conflicts: [], nonConflicting: [], index: 0 })
+      setAddDeliveryOrderFormOpen(false)
+      setAddDeliveryOrderConfirmOpen(false)
+      setAddGRNRows([{ grnNo: '', grnDate: '' }])
+      setAddDeliveryOrderApplyDateToAll(false)
+    }
+  }
+
+  const handleAddGRNConfirmNo = () => {
+    setAddDeliveryOrderConfirmOpen(false)
+  }
+
+  const handleAddGRNFormClose = () => {
+    setAddDeliveryOrderFormOpen(false)
+    setAddDeliveryOrderConfirmOpen(false)
+    setOverwriteDeliveryOrderModal({ open: false, conflicts: [], nonConflicting: [], index: 0 })
+    setAddGRNRows([{ grnNo: '', grnDate: '' }])
+    setAddDeliveryOrderApplyDateToAll(false)
   }
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-end gap-4">
+      <div className="flex items-center justify-between gap-4">
+        <button
+          type="button"
+          onClick={() => {
+            setAddDeliveryOrderFormOpen(true)
+            setAddDeliveryOrderConfirmOpen(false)
+            setAddGRNRows(addGRNMultiple ? Array(10).fill(null).map(() => ({ grnNo: '', grnDate: '' })) : [{ grnNo: '', grnDate: '' }])
+            setAddDeliveryOrderApplyDateToAll(false)
+          }}
+          className="inline-flex items-center gap-2 px-4 py-2 bg-blue-900 text-white rounded-lg hover:bg-blue-800 text-sm font-medium"
+        >
+          <Plus size={18} />
+          Add New GRN
+        </button>
         <label className="flex items-center gap-2 cursor-pointer">
           <span className="text-sm font-medium text-slate-700">Test Mode</span>
           <button
@@ -948,21 +1212,11 @@ export default function InvoiceTrackingPage() {
             />
           </button>
         </label>
-        {testMode && (
-          <button
-            type="button"
-            onClick={handleAddInvoiceRow}
-            className="inline-flex items-center gap-2 px-4 py-2 bg-blue-900 text-white rounded-lg hover:bg-blue-800 text-sm font-medium"
-          >
-            <Plus size={18} />
-            Add row
-          </button>
-        )}
       </div>
 
       <div className="bg-white rounded-lg shadow border border-slate-200 overflow-x-auto">
-        {invoicesLoading ? (
-          <div className="p-8 text-center text-slate-500">Loading invoices…</div>
+        {grnsLoading ? (
+          <div className="p-8 text-center text-slate-500">Loading GRN…</div>
         ) : (
         <table className="w-full min-w-[900px] text-sm">
           <thead>
@@ -970,18 +1224,18 @@ export default function InvoiceTrackingPage() {
               <th className="text-left py-3 px-4 font-semibold text-slate-700 w-12">
                 <input
                   type="checkbox"
-                  checked={invoices.length > 0 && selectedInvoiceIds.length === invoices.length}
+                  checked={grns.length > 0 && selectedInvoiceIds.length === grns.length}
                   onChange={(e) => {
-                    if (e.target.checked) setSelectedInvoiceIds(invoices.map((r) => r.id))
+                    if (e.target.checked) setSelectedInvoiceIds(grns.map((r) => r.id))
                     else setSelectedInvoiceIds([])
                   }}
                   onClick={(e) => e.stopPropagation()}
                   className="rounded border-slate-300 text-blue-900 focus:ring-blue-900"
-                  aria-label="Select all invoices"
+                  aria-label="Select all GRN"
                 />
               </th>
-              <th className="text-left py-3 px-4 font-semibold text-slate-700">Invoice No</th>
-              <th className="text-left py-3 px-4 font-semibold text-slate-700">Date of Invoice</th>
+              <th className="text-left py-3 px-4 font-semibold text-slate-700">GRN No</th>
+              <th className="text-left py-3 px-4 font-semibold text-slate-700">GRN Date</th>
               <th className="text-left py-3 px-4 font-semibold text-slate-700">Status</th>
               <th className="text-left py-3 px-4 font-semibold text-slate-700">Assigned To</th>
               <th className="text-left py-3 px-4 font-semibold text-slate-700">Assigned Date</th>
@@ -991,7 +1245,7 @@ export default function InvoiceTrackingPage() {
             </tr>
           </thead>
           <tbody>
-            {invoices.map((row) => {
+            {grns.map((row) => {
               const salesman = row.assignedSalesmanId
                 ? salesmen.find((s) => s.id === row.assignedSalesmanId)
                 : null
@@ -1099,53 +1353,18 @@ export default function InvoiceTrackingPage() {
                       }}
                       onClick={(e) => e.stopPropagation()}
                       className="rounded border-slate-300 text-blue-900 focus:ring-blue-900"
-                      aria-label={`Select invoice ${row.invoiceNo || row.id}`}
+                      aria-label={`Select GRN ${row.grnNo || row.id}`}
                     />
                   </td>
                   <td className="py-2 px-4">
-                    <input
-                      type="text"
-                      value={row.invoiceNo}
-                      onChange={(e) => updateRow(row.id, { invoiceNo: e.target.value })}
-                      readOnly={!canEditRow}
-                      className={`w-full max-w-[120px] py-1.5 px-2 border rounded ${
-                        canEditRow
-                          ? 'border-slate-300 focus:ring-2 focus:ring-blue-900'
-                          : 'border-transparent bg-transparent read-only:bg-transparent'
-                      }`}
-                    />
+                    <span className="py-1.5 px-2 block text-slate-700">
+                      {row.grnNo || '–'}
+                    </span>
                   </td>
                   <td className="py-2 px-4">
-                    {canEditRow ? (
-                      invoiceDatePickerRow === row.id ? (
-                        <input
-                          type="date"
-                          defaultValue={toInputDate(row.dateOfInvoice)}
-                          onBlur={(e) => {
-                            const v = e.target.value
-                            if (v) handleInvoiceDateChange(row.id, v)
-                            setInvoiceDatePickerRow(null)
-                          }}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Escape') setInvoiceDatePickerRow(null)
-                          }}
-                          autoFocus
-                          className="py-1.5 px-2 border border-slate-300 rounded focus:ring-2 focus:ring-blue-900 max-w-[140px]"
-                        />
-                      ) : (
-                        <button
-                          type="button"
-                          onClick={() => setInvoiceDatePickerRow(row.id)}
-                          className="text-left py-1.5 px-2 rounded hover:bg-slate-100 min-w-[100px]"
-                        >
-                          {row.dateOfInvoice ? formatDate(row.dateOfInvoice) : 'Select date'}
-                        </button>
-                      )
-                    ) : (
-                      <span className="py-1.5 px-2 block text-slate-700">
-                        {row.dateOfInvoice ? formatDate(row.dateOfInvoice) : '–'}
-                      </span>
-                    )}
+                    <span className="py-1.5 px-2 block text-slate-700">
+                      {row.grnDate ? formatDate(row.grnDate) : '–'}
+                    </span>
                   </td>
                   <td className="py-2 px-4">
                     {isCompletedLocked ? (
@@ -1292,11 +1511,245 @@ export default function InvoiceTrackingPage() {
         )}
       </div>
 
-      <DeliverySlotModal
+      {/* Add New GRN - Form */}
+      {addGRNFormOpen && !addGRNConfirmOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50" onClick={handleAddGRNFormClose}>
+          <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-auto p-6" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-lg font-semibold text-slate-800 mb-4">Add New GRN</h3>
+            <label className="flex items-center gap-2 mb-4 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={addGRNMultiple}
+                onChange={(e) => handleAddGRNMultipleToggle(e.target.checked)}
+                className="rounded border-slate-300 text-blue-900 focus:ring-blue-900"
+              />
+              <span className="text-sm text-slate-700">Add In Multiple</span>
+            </label>
+            {!addGRNMultiple ? (
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">GRN No</label>
+                  <input
+                    type="text"
+                    value={addGRNRows[0]?.grnNo || ''}
+                    onChange={(e) => setAddGRNRow(0, 'grnNo', e.target.value)}
+                    className="w-full py-2 px-3 border border-slate-300 rounded focus:ring-2 focus:ring-blue-900"
+                    placeholder="e.g. GRN-001"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">GRN Date</label>
+                  <input
+                    type="date"
+                    value={addGRNRows[0]?.grnDate || ''}
+                    onChange={(e) => setAddGRNRow(0, 'grnDate', e.target.value)}
+                    className="w-full py-2 px-3 border border-slate-300 rounded focus:ring-2 focus:ring-blue-900"
+                  />
+                </div>
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm border border-slate-200">
+                  <thead>
+                    <tr className="bg-slate-100">
+                      <th className="text-left py-2 px-3 font-semibold text-slate-700">GRN No</th>
+                      <th className="text-left py-2 px-3 font-semibold text-slate-700">GRN Date</th>
+                      <th className="text-left py-2 px-3 font-semibold text-slate-700 w-28">
+                        <label className="flex items-center gap-1 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={addGRNApplyDateToAll}
+                            onChange={(e) => handleAddGRNApplyDateToAllChange(e.target.checked)}
+                            className="rounded border-slate-300 text-blue-900 focus:ring-blue-900"
+                          />
+                          Apply To All
+                        </label>
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {addGRNRows.map((row, i) => (
+                      <tr key={i} className="border-t border-slate-200">
+                        <td className="py-2 px-3">
+                          <input
+                            type="text"
+                            value={row.grnNo}
+                            onChange={(e) => setAddGRNRow(i, 'grnNo', e.target.value)}
+                            className="w-full py-1.5 px-2 border border-slate-300 rounded text-sm"
+                            placeholder={`No. ${i + 1}`}
+                          />
+                        </td>
+                        <td className="py-2 px-3">
+                          <input
+                            type="date"
+                            value={addGRNApplyDateToAll ? (addGRNRows[0]?.grnDate || '') : row.grnDate}
+                            onChange={(e) => setAddGRNRow(i, 'grnDate', e.target.value)}
+                            disabled={addGRNApplyDateToAll && i > 0}
+                            className={`w-full py-1.5 px-2 border rounded text-sm ${addGRNApplyDateToAll && i > 0 ? 'bg-slate-100 border-slate-200' : 'border-slate-300'}`}
+                          />
+                        </td>
+                        <td className="py-2 px-3" />
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            <div className="flex justify-end gap-2 mt-6">
+              <button type="button" onClick={handleAddGRNFormClose} className="px-4 py-2 border border-slate-300 rounded-lg hover:bg-slate-50">Cancel</button>
+              <button type="button" onClick={handleAddGRNProceed} className="px-4 py-2 bg-blue-900 text-white rounded-lg hover:bg-blue-800">Done</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Add New GRN - Confirm */}
+      {addGRNFormOpen && addGRNConfirmOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50" onClick={handleAddGRNConfirmNo}>
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full max-h-[90vh] overflow-auto p-6" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-lg font-semibold text-slate-800 mb-2">Confirm new GRN</h3>
+            <p className="text-slate-600 text-sm mb-4">Please confirm the following. Is all correct?</p>
+            <ul className="border border-slate-200 rounded-lg divide-y divide-slate-200 mb-6 max-h-60 overflow-y-auto">
+              {getAddGRNEntries().map((e, i) => (
+                <li key={i} className="py-2 px-3 flex justify-between text-sm">
+                  <span className="font-medium text-slate-800">{e.grnNo}</span>
+                  <span className="text-slate-600">{e.grnDate ? formatDate(e.grnDate) : '–'}</span>
+                </li>
+              ))}
+            </ul>
+            <div className="flex justify-end gap-2">
+              <button type="button" onClick={handleAddGRNConfirmNo} className="px-4 py-2 border border-slate-300 rounded-lg hover:bg-slate-50">No</button>
+              <button type="button" onClick={handleAddGRNConfirmYes} className="px-4 py-2 bg-blue-900 text-white rounded-lg hover:bg-blue-800">Yes</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Overwrite existing Delivery Order */}
+      {overwriteGRNModal.open && overwriteGRNModal.conflicts[overwriteGRNModal.index] && (() => {
+        const { existingRow, newEntry } = overwriteGRNModal.conflicts[overwriteGRNModal.index]
+        const existingDisplay = getGRNRowDisplay(existingRow)
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50" onClick={() => handleOverwriteGRNNo()}>
+            <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-auto p-6" onClick={(e) => e.stopPropagation()}>
+              <h3 className="text-lg font-semibold text-slate-800 mb-2">Delivery order already exists</h3>
+              <p className="text-slate-600 text-sm mb-4">
+                <strong>{newEntry.grnNo}</strong> already exists. Do you want to overwrite it? Once overwrite, you may lose the progress of the existing GRN.
+              </p>
+              <div className="grid grid-cols-2 gap-4 mb-6">
+                <div className="border border-slate-200 rounded-lg p-3 bg-slate-50">
+                  <p className="text-xs font-semibold text-slate-500 uppercase mb-2">Existing</p>
+                  <table className="text-sm w-full">
+                    <tbody>
+                      <tr><td className="text-slate-500 py-1 pr-2">GRN No</td><td className="font-medium">{existingRow.grnNo || '–'}</td></tr>
+                      <tr><td className="text-slate-500 py-1 pr-2">GRN Date</td><td>{existingRow.grnDate ? formatDate(existingRow.grnDate) : '–'}</td></tr>
+                      <tr><td className="text-slate-500 py-1 pr-2">Status</td><td>{existingDisplay.status}</td></tr>
+                      <tr><td className="text-slate-500 py-1 pr-2">Assigned To</td><td>{existingDisplay.assignedTo}</td></tr>
+                      <tr><td className="text-slate-500 py-1 pr-2">Assigned Date</td><td>{existingDisplay.assignedDate}</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div className="border border-slate-200 rounded-lg p-3 bg-blue-50/50">
+                  <p className="text-xs font-semibold text-slate-500 uppercase mb-2">New</p>
+                  <table className="text-sm w-full">
+                    <tbody>
+                      <tr><td className="text-slate-500 py-1 pr-2">GRN No</td><td className="font-medium">{newEntry.grnNo || '–'}</td></tr>
+                      <tr><td className="text-slate-500 py-1 pr-2">GRN Date</td><td>{newEntry.grnDate ? formatDate(newEntry.grnDate) : '–'}</td></tr>
+                      <tr><td className="text-slate-500 py-1 pr-2">Status</td><td>Billed</td></tr>
+                      <tr><td className="text-slate-500 py-1 pr-2">Assigned To</td><td>–</td></tr>
+                      <tr><td className="text-slate-500 py-1 pr-2">Assigned Date</td><td>–</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+              <div className="flex justify-end gap-2">
+                <button type="button" onClick={handleOverwriteGRNNo} className="px-4 py-2 border border-slate-300 rounded-lg hover:bg-slate-50">No</button>
+                <button type="button" onClick={handleOverwriteGRNYes} className="px-4 py-2 bg-blue-900 text-white rounded-lg hover:bg-blue-800">Yes</button>
+              </div>
+            </div>
+          </div>
+        )
+      })()}
+
+      <DeliveryTimeAndAttachmentModal
         isOpen={deliveryModal.open}
         dateLabel={deliveryModal.dateLabel}
-        onClose={() => setDeliveryModal({ open: false, rowId: null, dateLabel: '' })}
-        onSelect={handleDeliverySlotSelect}
+        skipTimeStep={deliveryModal.skipTimeStep}
+        onClose={() => setDeliveryModal({ open: false, rowId: null, dateLabel: '', skipTimeStep: false })}
+        onComplete={handleDeliveryTimeAndAttachmentComplete}
+      />
+
+      {invoiceSearchModal.open && createPortal(
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4 bg-black/50" onClick={handleInvoiceSearchCancel}>
+          <div
+            className="bg-white rounded-lg shadow-xl max-w-md w-full max-h-[85vh] overflow-hidden flex flex-col p-6"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-lg font-semibold text-slate-800 mb-2">Search invoice</h3>
+            <p className="text-slate-600 text-sm mb-3">Enter invoice number (from Invoice Tracking list):</p>
+            <input
+              type="text"
+              value={invoiceSearchQuery}
+              onChange={(e) => {
+                setInvoiceSearchQuery(e.target.value)
+                setInvoiceSearchSelectedId(null)
+              }}
+              placeholder="e.g. INV-001"
+              className="w-full py-2 px-3 border border-slate-300 rounded focus:ring-2 focus:ring-blue-900 mb-3"
+              aria-label="Invoice number search"
+            />
+            <div className="border border-slate-200 rounded overflow-auto flex-1 min-h-[120px] max-h-[200px] mb-4">
+              {getFilteredInvoicesForSearch().length === 0 ? (
+                <div className="p-4 text-slate-500 text-sm text-center">
+                  {invoiceSearchList.length === 0 ? 'No invoices in list.' : 'No match. Type to search.'}
+                </div>
+              ) : (
+                <ul className="divide-y divide-slate-100">
+                  {getFilteredInvoicesForSearch().map((inv) => (
+                    <li key={inv.id}>
+                      <button
+                        type="button"
+                        onClick={() => setInvoiceSearchSelectedId(inv.id)}
+                        className={`w-full text-left py-2 px-3 text-sm hover:bg-slate-50 ${
+                          invoiceSearchSelectedId === inv.id ? 'bg-blue-50 text-blue-900 font-medium' : 'text-slate-700'
+                        }`}
+                      >
+                        {inv.invoiceNo || inv.id}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+            <p className="text-slate-500 text-xs mb-3">
+              {invoiceSearchSelectedId ? 'Selected: ' + (invoiceSearchList.find((r) => r.id === invoiceSearchSelectedId)?.invoiceNo || invoiceSearchSelectedId) : 'Select an invoice to confirm.'}
+            </p>
+            <div className="flex gap-2 justify-end">
+              <button
+                type="button"
+                onClick={handleInvoiceSearchCancel}
+                className="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleInvoiceSearchConfirm}
+                disabled={!(invoiceSearchSelectedId || getFilteredInvoicesForSearch().length === 1)}
+                className="px-6 py-2 bg-blue-900 text-white rounded-lg hover:bg-blue-800 font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Confirm invoice selected
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
+
+      <NoticeModal
+        isOpen={invoiceAttachedNotice.open}
+        message={invoiceAttachedNotice.message}
+        onClose={() => setInvoiceAttachedNotice({ open: false, message: '' })}
       />
 
       <DiscrepancyModal
@@ -1655,15 +2108,15 @@ export default function InvoiceTrackingPage() {
             className="bg-white rounded-lg shadow-xl max-w-md w-full p-6"
             onClick={(e) => e.stopPropagation()}
           >
-            <h3 className="text-lg font-semibold text-slate-800 mb-3">Apply to selected invoices?</h3>
+            <h3 className="text-lg font-semibold text-slate-800 mb-3">Apply to selected GRN?</h3>
             <p className="text-slate-600 text-sm mb-2">
               Are you sure you want to apply this to the following?
             </p>
             <ul className="text-slate-700 text-sm mb-4 max-h-40 overflow-y-auto list-disc list-inside">
               {bulkApplyConfirmModal.rowIds.map((id) => {
-                const inv = invoices.find((r) => r.id === id)
+                const inv = grns.find((r) => r.id === id)
                 return (
-                  <li key={id}>{inv?.invoiceNo || id}</li>
+                  <li key={id}>{inv?.grnNo || id}</li>
                 )
               })}
             </ul>

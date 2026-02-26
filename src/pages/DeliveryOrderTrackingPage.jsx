@@ -1,10 +1,11 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { createPortal } from 'react-dom'
+import { createPortal, flushSync } from 'react-dom'
 import { Trash2, Plus } from 'lucide-react'
 import { useEmployees } from '../context/EmployeesContext'
 import { useWarehouses } from '../context/WarehousesContext'
 import { formatDate, toInputDate, parseDate } from '../utils/dateFormat'
-import { fetchInvoices, insertInvoice, updateInvoice, deleteInvoice } from '../api/invoices'
+import { fetchDeliveryOrders, insertDeliveryOrder, updateDeliveryOrder, deleteDeliveryOrder } from '../api/deliveryOrders'
+import { fetchInvoices, updateInvoice } from '../api/invoices'
 import DeliverySlotModal from '../components/DeliverySlotModal'
 import DiscrepancyModal from '../components/DiscrepancyModal'
 import SelectSalesmanModal from '../components/SelectSalesmanModal'
@@ -78,11 +79,12 @@ const PHASE_4_LOCKED_MSG = 'This Status can no longer be changed as the order ha
 
 const defaultDiscrepancy = () => ({ checked: false, title: '', description: '' })
 
-function createInvoice(overrides = {}) {
+function createDeliveryOrder(overrides = {}) {
   return {
     id: String(Date.now() + Math.random()),
-    invoiceNo: '',
-    dateOfInvoice: '',
+    deliveryOrderNo: '',
+    deliveryOrderDate: '',
+    numberAndDateLocked: false,
     status: 'Billed',
     assignedDriverId: null,
     assignedSalesmanId: null,
@@ -99,14 +101,25 @@ function createInvoice(overrides = {}) {
   }
 }
 
-export default function InvoiceTrackingPage() {
+export default function DeliveryOrderTrackingPage() {
   const { employees } = useEmployees()
   const { warehouses } = useWarehouses()
   const drivers = employees.filter((e) => e.position === 'Lorry Driver')
   const salesmen = employees.filter((e) => e.position === 'Salesman')
   const [testMode, setTestMode] = useState(false)
-  const [invoices, setInvoices] = useState([])
-  const [invoicesLoading, setInvoicesLoading] = useState(true)
+  const [deliveryOrders, setDeliveryOrders] = useState([])
+  const [deliveryOrdersLoading, setDeliveryOrdersLoading] = useState(true)
+  const [addDeliveryOrderFormOpen, setAddDeliveryOrderFormOpen] = useState(false)
+  const [addDeliveryOrderMultiple, setAddDeliveryOrderMultiple] = useState(false)
+  const [addDeliveryOrderRows, setAddDeliveryOrderRows] = useState([{ deliveryOrderNo: '', deliveryOrderDate: '' }])
+  const [addDeliveryOrderApplyDateToAll, setAddDeliveryOrderApplyDateToAll] = useState(false)
+  const [addDeliveryOrderConfirmOpen, setAddDeliveryOrderConfirmOpen] = useState(false)
+  const [overwriteDeliveryOrderModal, setOverwriteDeliveryOrderModal] = useState({
+    open: false,
+    conflicts: [],
+    nonConflicting: [],
+    index: 0,
+  })
   const [deliveryModal, setDeliveryModal] = useState({ open: false, rowId: null, dateLabel: '' })
   const [discrepancyModal, setDiscrepancyModal] = useState({
     open: false,
@@ -115,7 +128,7 @@ export default function InvoiceTrackingPage() {
     description: '',
   })
   const [datePickerRow, setDatePickerRow] = useState(null)
-  const [invoiceDatePickerRow, setInvoiceDatePickerRow] = useState(null)
+  const [deliveryOrderDatePickerRow, setDeliveryOrderDatePickerRow] = useState(null)
   const [salesmanModal, setSalesmanModal] = useState({ open: false, rowId: null, previousStatus: '' })
   const [clerkModal, setClerkModal] = useState({ open: false, rowId: null, previousStatus: '' })
   const [warehouseModal, setWarehouseModal] = useState({ open: false, rowId: null, previousStatus: '' })
@@ -182,6 +195,18 @@ export default function InvoiceTrackingPage() {
     payload: null,
     onApplied: null,
   })
+  const [attachmentModal, setAttachmentModal] = useState({ open: false, rowId: null })
+  const [attachmentType, setAttachmentType] = useState('none') // 'original' | 'copy' | 'none'
+  const [invoiceSearchModal, setInvoiceSearchModal] = useState({
+    open: false,
+    forRowId: null,
+    attachmentType: 'original',
+    deliveryOrderRow: null,
+  })
+  const [invoiceSearchQuery, setInvoiceSearchQuery] = useState('')
+  const [invoiceSearchSelectedId, setInvoiceSearchSelectedId] = useState(null)
+  const [invoiceAttachedNotice, setInvoiceAttachedNotice] = useState({ open: false, message: '' })
+  const [invoiceSearchList, setInvoiceSearchList] = useState([])
   const assignDatePendingRef = useRef({
     rowId: null,
     fromDriver: false,
@@ -190,74 +215,74 @@ export default function InvoiceTrackingPage() {
   })
   const pendingBulkRowIdsRef = useRef(null)
 
-  const loadInvoices = useCallback(async () => {
-    setInvoicesLoading(true)
+  const loadDeliveryOrders = useCallback(async () => {
+    setDeliveryOrdersLoading(true)
     try {
-      const data = await fetchInvoices()
+      const data = await fetchDeliveryOrders()
       if (data.length === 0) {
         const samples = [
-          createInvoice({ invoiceNo: 'INV-001', dateOfInvoice: '2025-02-20' }),
-          createInvoice({ invoiceNo: 'INV-002', dateOfInvoice: '2025-02-21' }),
-          createInvoice({ invoiceNo: 'INV-003', dateOfInvoice: '2025-02-22' }),
-          createInvoice({ invoiceNo: 'INV-004', dateOfInvoice: '2025-02-23' }),
-          createInvoice({ invoiceNo: 'INV-005', dateOfInvoice: '2025-02-24' }),
+          createDeliveryOrder({ deliveryOrderNo: 'DO-001', deliveryOrderDate: '2025-02-20' }),
+          createDeliveryOrder({ deliveryOrderNo: 'DO-002', deliveryOrderDate: '2025-02-21' }),
+          createDeliveryOrder({ deliveryOrderNo: 'DO-003', deliveryOrderDate: '2025-02-22' }),
+          createDeliveryOrder({ deliveryOrderNo: 'DO-004', deliveryOrderDate: '2025-02-23' }),
+          createDeliveryOrder({ deliveryOrderNo: 'DO-005', deliveryOrderDate: '2025-02-24' }),
         ]
         const inserted = []
         for (const row of samples) {
-          const saved = await insertInvoice(row)
+          const saved = await insertDeliveryOrder(row)
           inserted.push(saved)
         }
-        setInvoices(inserted)
+        setDeliveryOrders(inserted)
       } else {
-        setInvoices(data)
+        setDeliveryOrders(data)
       }
     } catch (e) {
-      console.error('Fetch invoices error:', e)
+      console.error('Fetch delivery orders error:', e)
       try {
         const samples = [
-          createInvoice({ invoiceNo: 'INV-001', dateOfInvoice: '2025-02-20' }),
-          createInvoice({ invoiceNo: 'INV-002', dateOfInvoice: '2025-02-21' }),
-          createInvoice({ invoiceNo: 'INV-003', dateOfInvoice: '2025-02-22' }),
-          createInvoice({ invoiceNo: 'INV-004', dateOfInvoice: '2025-02-23' }),
-          createInvoice({ invoiceNo: 'INV-005', dateOfInvoice: '2025-02-24' }),
+          createDeliveryOrder({ deliveryOrderNo: 'DO-001', deliveryOrderDate: '2025-02-20' }),
+          createDeliveryOrder({ deliveryOrderNo: 'DO-002', deliveryOrderDate: '2025-02-21' }),
+          createDeliveryOrder({ deliveryOrderNo: 'DO-003', deliveryOrderDate: '2025-02-22' }),
+          createDeliveryOrder({ deliveryOrderNo: 'DO-004', deliveryOrderDate: '2025-02-23' }),
+          createDeliveryOrder({ deliveryOrderNo: 'DO-005', deliveryOrderDate: '2025-02-24' }),
         ]
         const inserted = []
         for (const row of samples) {
-          const saved = await insertInvoice(row)
+          const saved = await insertDeliveryOrder(row)
           inserted.push(saved)
         }
-        setInvoices(inserted)
+        setDeliveryOrders(inserted)
       } catch (e2) {
-        setInvoices([
-          createInvoice({ invoiceNo: 'INV-001', dateOfInvoice: '2025-02-20' }),
-          createInvoice({ invoiceNo: 'INV-002', dateOfInvoice: '2025-02-21' }),
-          createInvoice({ invoiceNo: 'INV-003', dateOfInvoice: '2025-02-22' }),
-          createInvoice({ invoiceNo: 'INV-004', dateOfInvoice: '2025-02-23' }),
-          createInvoice({ invoiceNo: 'INV-005', dateOfInvoice: '2025-02-24' }),
+        setDeliveryOrders([
+          createDeliveryOrder({ deliveryOrderNo: 'DO-001', deliveryOrderDate: '2025-02-20' }),
+          createDeliveryOrder({ deliveryOrderNo: 'DO-002', deliveryOrderDate: '2025-02-21' }),
+          createDeliveryOrder({ deliveryOrderNo: 'DO-003', deliveryOrderDate: '2025-02-22' }),
+          createDeliveryOrder({ deliveryOrderNo: 'DO-004', deliveryOrderDate: '2025-02-23' }),
+          createDeliveryOrder({ deliveryOrderNo: 'DO-005', deliveryOrderDate: '2025-02-24' }),
         ])
       }
     }
-    setInvoicesLoading(false)
+    setDeliveryOrdersLoading(false)
   }, [])
 
   useEffect(() => {
-    loadInvoices()
-  }, [loadInvoices])
+    loadDeliveryOrders()
+  }, [loadDeliveryOrders])
 
   const updateRow = (id, updates) => {
-    setInvoices((prev) => {
+    setDeliveryOrders((prev) => {
       const next = prev.map((row) => (row.id === id ? { ...row, ...updates } : row))
       const row = next.find((r) => r.id === id)
       if (!row) return next
       // Local storage: always persist (no testMode gate)
       if (isLocalId(id)) {
-        updateInvoice(id, row).catch((e) => console.error('Update invoice error:', e))
+        updateDeliveryOrder(id, row).catch((e) => console.error('Update delivery order error:', e))
       } else {
-        insertInvoice(row)
+        insertDeliveryOrder(row)
           .then((inserted) => {
-            setInvoices((p) => p.map((r) => (r.id === id ? inserted : r)))
+            setDeliveryOrders((p) => p.map((r) => (r.id === id ? inserted : r)))
           })
-          .catch((e) => console.error('Insert invoice error:', e))
+          .catch((e) => console.error('Insert delivery order error:', e))
       }
       return next
     })
@@ -265,9 +290,9 @@ export default function InvoiceTrackingPage() {
 
   const deleteRow = (id) => {
     if (!testMode) return
-    deleteInvoice(id)
-      .then(() => setInvoices((prev) => prev.filter((row) => row.id !== id)))
-      .catch((e) => console.error('Delete invoice error:', e))
+    deleteDeliveryOrder(id)
+      .then(() => setDeliveryOrders((prev) => prev.filter((row) => row.id !== id)))
+      .catch((e) => console.error('Delete delivery order error:', e))
   }
 
   const isBulkApply = () => {
@@ -313,7 +338,7 @@ export default function InvoiceTrackingPage() {
     const parsed = parseDate(value)
     if (!parsed) return
     setDatePickerRow(null)
-    const row = invoices.find((r) => r.id === rowId)
+    const row = deliveryOrders.find((r) => r.id === rowId)
     const isHoldOrChopSign =
       row?.status?.startsWith('Hold -') || row?.status?.startsWith('Chop & Sign -')
     if (isHoldOrChopSign) {
@@ -324,16 +349,17 @@ export default function InvoiceTrackingPage() {
     updateRow(rowId, { deliveryDate: parsed, deliverySlot: '' })
   }
 
-  const handleInvoiceDateChange = (rowId, value) => {
+  const handleDeliveryOrderDateChange = (rowId, value) => {
     const parsed = parseDate(value)
-    if (parsed) updateRow(rowId, { dateOfInvoice: parsed })
-    setInvoiceDatePickerRow(null)
+    if (parsed) updateRow(rowId, { deliveryOrderDate: parsed })
+    setDeliveryOrderDatePickerRow(null)
   }
 
   const handleDeliverySlotSelect = (slot) => {
     if (!deliveryModal.rowId) return
+    const rowId = deliveryModal.rowId
     const displaySlot = slot === 'Afternoon' ? 'Noon' : slot
-    const row = invoices.find((r) => r.id === deliveryModal.rowId)
+    const row = deliveryOrders.find((r) => r.id === rowId)
     const payload = row
       ? {
           status: row.status,
@@ -343,15 +369,18 @@ export default function InvoiceTrackingPage() {
           deliverySlot: displaySlot,
         }
       : { deliverySlot: displaySlot, deliveryDate: '' }
-    updateRow(deliveryModal.rowId, payload)
-    afterBulkableCommit(deliveryModal.rowId, payload, () =>
+    updateRow(rowId, payload)
+    flushSync(() => {
       setDeliveryModal({ open: false, rowId: null, dateLabel: '' })
-    )
+    })
+    afterBulkableCommit(rowId, payload, () => {})
+    setAttachmentModal({ open: true, rowId })
+    setAttachmentType('none')
   }
 
   const handleDiscrepancyCheck = (rowId, checked) => {
     if (checked) {
-      const row = invoices.find((r) => r.id === rowId)
+      const row = deliveryOrders.find((r) => r.id === rowId)
       updateRow(rowId, { discrepancy: { ...row.discrepancy, checked: true } })
       setDiscrepancyModal({
         open: true,
@@ -377,7 +406,7 @@ export default function InvoiceTrackingPage() {
   }
 
   const handleStatusChange = (rowId, newStatus, previousStatus) => {
-    const row = invoices.find((r) => r.id === rowId)
+    const row = deliveryOrders.find((r) => r.id === rowId)
     if (newStatus === row.status) {
       setSameStatusConfirmModal({ open: true, rowId, status: newStatus })
       return
@@ -486,7 +515,7 @@ export default function InvoiceTrackingPage() {
   const handleSalesmanSelect = (rowId, salesmanId) => {
     updateRow(rowId, { assignedSalesmanId: salesmanId })
     setSalesmanModal({ open: false, rowId: null, previousStatus: '' })
-    const row = invoices.find((r) => r.id === rowId)
+    const row = deliveryOrders.find((r) => r.id === rowId)
     assignDatePendingRef.current = { rowId, fromDriver: false }
     setAssignDateModal({
       open: true,
@@ -504,7 +533,7 @@ export default function InvoiceTrackingPage() {
   const handleClerkSelect = (rowId, clerkId) => {
     updateRow(rowId, { assignedClerkId: clerkId })
     setClerkModal({ open: false, rowId: null, previousStatus: '' })
-    const row = invoices.find((r) => r.id === rowId)
+    const row = deliveryOrders.find((r) => r.id === rowId)
     assignDatePendingRef.current = { rowId, fromDriver: false }
     setAssignDateModal({
       open: true,
@@ -572,7 +601,7 @@ export default function InvoiceTrackingPage() {
       fromChopSignWarehouse: false,
       fromChopSignNoFlow: { rowId, warehouseId },
     }
-    const row = invoices.find((r) => r.id === rowId)
+    const row = deliveryOrders.find((r) => r.id === rowId)
     setAssignDateModal({
       open: true,
       rowId,
@@ -587,7 +616,7 @@ export default function InvoiceTrackingPage() {
 
   const handleHoldWarehouseTypeSelect = (type) => {
     const { rowId, warehouseId } = holdWarehouseTypeModal
-    const row = invoices.find((r) => r.id === rowId)
+    const row = deliveryOrders.find((r) => r.id === rowId)
     const currentRemark = row?.remark?.trim() || ''
     const newRemark = currentRemark ? `${currentRemark} / ${type}` : type
     const payload = {
@@ -661,7 +690,7 @@ export default function InvoiceTrackingPage() {
 
   const handleBacktrackPhase2To1Yes = () => {
     const { rowId } = backtrackPhase2To1Modal
-    const row = invoices.find((r) => r.id === rowId)
+    const row = deliveryOrders.find((r) => r.id === rowId)
     const payload = rowId && row ? {
       status: 'Billed',
       assignedDriverId: null,
@@ -736,7 +765,7 @@ export default function InvoiceTrackingPage() {
       setPhase4BacktrackModal({ open: false, rowId: null, newStatus: '', previousStatus: '' })
       return
     }
-    const row = invoices.find((r) => r.id === rowId)
+    const row = deliveryOrders.find((r) => r.id === rowId)
     const resetPayload = {
       status: newStatus,
       assignedDriverId: null,
@@ -816,7 +845,7 @@ export default function InvoiceTrackingPage() {
       if (rowIdToUse) {
         if (fromChopSignNoFlow) {
           const { warehouseId } = fromChopSignNoFlow
-          const row = invoices.find((r) => r.id === rowIdToUse)
+          const row = deliveryOrders.find((r) => r.id === rowIdToUse)
           const currentRemark = row?.remark?.trim() || ''
           const newRemark = currentRemark ? `${currentRemark} / Chop & Sign` : 'Chop & Sign'
           const payload = {
@@ -833,7 +862,7 @@ export default function InvoiceTrackingPage() {
           return
         }
         if (fromChopSignWarehouse) {
-          const row = invoices.find((r) => r.id === rowIdToUse)
+          const row = deliveryOrders.find((r) => r.id === rowIdToUse)
           const currentRemark = row?.remark?.trim() || ''
           const newRemark = currentRemark ? `${currentRemark} / Chop & Sign` : 'Chop & Sign'
           const payload = {
@@ -850,7 +879,7 @@ export default function InvoiceTrackingPage() {
         if (fromDriver) {
           setDeliveryModal({ open: true, rowId: rowIdToUse, dateLabel: formatDate(dateToSave) })
         } else {
-          const leadRow = invoices.find((r) => r.id === rowIdToUse)
+          const leadRow = deliveryOrders.find((r) => r.id === rowIdToUse)
           const payload = leadRow
             ? {
                 status: leadRow.status,
@@ -861,6 +890,11 @@ export default function InvoiceTrackingPage() {
               }
             : { deliveryDate: dateToSave, deliverySlot: '' }
           afterBulkableCommit(rowIdToUse, payload, () => {})
+          // Always open attachment modal after date (Salesman path) - not inside callback
+          setTimeout(() => {
+            setAttachmentModal({ open: true, rowId: rowIdToUse })
+            setAttachmentType('none')
+          }, 100)
         }
       }
     } catch (e) {
@@ -898,7 +932,7 @@ export default function InvoiceTrackingPage() {
     const fromChopSignWarehouse = driverModal.fromChopSignWarehouse
     updateRow(rowId, { assignedDriverId: driverId })
     setDriverModal({ open: false, rowId: null, previousStatus: '', fromChopSignWarehouse: false })
-    const row = invoices.find((r) => r.id === rowId)
+    const row = deliveryOrders.find((r) => r.id === rowId)
     assignDatePendingRef.current = { rowId, fromDriver: true, fromChopSignWarehouse: !!fromChopSignWarehouse }
     setAssignDateModal({
       open: true,
@@ -913,22 +947,276 @@ export default function InvoiceTrackingPage() {
     setDriverModal({ open: false, rowId: null, previousStatus: '', fromChopSignWarehouse: false })
   }
 
-  const handleAddInvoiceRow = async () => {
-    const newRow = createInvoice({
-      invoiceNo: '',
-      dateOfInvoice: getTodayDateStr(),
-    })
-    try {
-      const inserted = await insertInvoice(newRow)
-      setInvoices((prev) => [...prev, inserted])
-    } catch (e) {
-      console.error('Add invoice row error:', e)
+  const handleAttachmentOk = () => {
+    const rowId = attachmentModal.rowId
+    if (!rowId) {
+      setAttachmentModal({ open: false, rowId: null })
+      return
     }
+    if (attachmentType === 'none') {
+      setAttachmentModal({ open: false, rowId: null })
+      setAttachmentType('none')
+      return
+    }
+    const deliveryOrderRow = deliveryOrders.find((r) => r.id === rowId)
+    setAttachmentModal({ open: false, rowId: null })
+    setAttachmentType('none')
+    fetchInvoices().then((list) => {
+      setInvoiceSearchList(list)
+      setInvoiceSearchQuery('')
+      setInvoiceSearchSelectedId(null)
+      setInvoiceSearchModal({
+        open: true,
+        forRowId: rowId,
+        attachmentType,
+        deliveryOrderRow: deliveryOrderRow || null,
+      })
+    })
+  }
+
+  const handleAttachmentCancel = () => {
+    setAttachmentModal({ open: false, rowId: null })
+    setAttachmentType('none')
+  }
+
+  const getFilteredInvoicesForSearch = () => {
+    const q = (invoiceSearchQuery || '').trim().toLowerCase()
+    if (!q) return invoiceSearchList
+    return invoiceSearchList.filter(
+      (inv) => (inv.invoiceNo || '').toLowerCase().includes(q)
+    )
+  }
+
+  const handleInvoiceSearchConfirm = async () => {
+    const { forRowId, attachmentType: type, deliveryOrderRow } = invoiceSearchModal
+    if (!forRowId || !deliveryOrderRow) {
+      setInvoiceSearchModal({ open: false, forRowId: null, attachmentType: 'original', deliveryOrderRow: null })
+      setInvoiceSearchList([])
+      return
+    }
+    const filtered = getFilteredInvoicesForSearch()
+    const selectedInvoice = invoiceSearchSelectedId
+      ? invoiceSearchList.find((r) => r.id === invoiceSearchSelectedId)
+      : filtered.length === 1 ? filtered[0] : null
+    if ((type === 'original' || type === 'copy') && !selectedInvoice) return
+    const invoiceNo = selectedInvoice?.invoiceNo || selectedInvoice?.id
+    if (type === 'original' && selectedInvoice) {
+      await updateInvoice(selectedInvoice.id, {
+        status: deliveryOrderRow.status,
+        assignedDriverId: deliveryOrderRow.assignedDriverId,
+        assignedSalesmanId: deliveryOrderRow.assignedSalesmanId,
+        deliveryDate: deliveryOrderRow.deliveryDate || '',
+        deliverySlot: deliveryOrderRow.deliverySlot || '',
+      })
+      setInvoiceAttachedNotice({
+        open: true,
+        message: `Invoice ${invoiceNo} has been updated with Delivery Order ${deliveryOrderRow.deliveryOrderNo || forRowId}.`,
+      })
+    }
+    if (type === 'copy' && selectedInvoice) {
+      const row = deliveryOrders.find((r) => r.id === forRowId)
+      const currentRemark = (row?.remark || '').trim()
+      const newRemark = currentRemark
+        ? `${currentRemark} / Refer Invoice ${invoiceNo}`
+        : `Refer Invoice ${invoiceNo}`
+      updateRow(forRowId, { remark: newRemark })
+    }
+    setInvoiceSearchModal({ open: false, forRowId: null, attachmentType: 'original', deliveryOrderRow: null })
+    setInvoiceSearchList([])
+    setInvoiceSearchQuery('')
+    setInvoiceSearchSelectedId(null)
+  }
+
+  const handleInvoiceSearchCancel = () => {
+    setInvoiceSearchModal({ open: false, forRowId: null, attachmentType: 'original', deliveryOrderRow: null })
+    setInvoiceSearchList([])
+    setInvoiceSearchQuery('')
+    setInvoiceSearchSelectedId(null)
+  }
+
+  const handleAddDeliveryOrderApplyDateToAllChange = (checked) => {
+    setAddDeliveryOrderApplyDateToAll(checked)
+    if (checked) {
+      const firstDate = addDeliveryOrderRows[0]?.deliveryOrderDate || ''
+      setAddDeliveryOrderRows((prev) => prev.map((r) => ({ ...r, deliveryOrderDate: firstDate })))
+    }
+  }
+  const handleAddDeliveryOrderMultipleToggle = (on) => {
+    setAddDeliveryOrderMultiple(on)
+    if (on) {
+      const newRows = Array(10).fill(null).map(() => ({ deliveryOrderNo: '', deliveryOrderDate: '' }))
+      setAddDeliveryOrderRows(newRows)
+      setAddDeliveryOrderApplyDateToAll(false)
+    } else {
+      const first = addDeliveryOrderRows[0] ? { ...addDeliveryOrderRows[0] } : { deliveryOrderNo: '', deliveryOrderDate: '' }
+      setAddDeliveryOrderRows([first])
+      setAddDeliveryOrderApplyDateToAll(false)
+    }
+  }
+
+  const setAddDeliveryOrderRow = (index, field, value) => {
+    setAddDeliveryOrderRows((prev) => {
+      const next = prev.map((r, i) => (i === index ? { ...r, [field]: value } : r))
+      if (addDeliveryOrderApplyDateToAll && field === 'deliveryOrderDate' && index === 0) {
+        return next.map((r, i) => (i === 0 ? r : { ...r, deliveryOrderDate: value }))
+      }
+      return next
+    })
+  }
+
+  const getAddDeliveryOrderEntries = () => {
+    const firstDate = addDeliveryOrderApplyDateToAll ? (addDeliveryOrderRows[0]?.deliveryOrderDate || '') : null
+    return addDeliveryOrderRows
+      .map((r) => ({
+        deliveryOrderNo: r.deliveryOrderNo?.trim(),
+        deliveryOrderDate: addDeliveryOrderApplyDateToAll ? firstDate : (r.deliveryOrderDate || ''),
+      }))
+      .filter((e) => e.deliveryOrderNo)
+  }
+
+  const handleAddDeliveryOrderProceed = () => {
+    const entries = getAddDeliveryOrderEntries()
+    if (entries.length === 0) return
+    if (addDeliveryOrderApplyDateToAll && !addDeliveryOrderRows[0]?.deliveryOrderDate) return
+    for (const e of entries) {
+      if (!addDeliveryOrderApplyDateToAll && !e.deliveryOrderDate) return
+    }
+    setAddDeliveryOrderConfirmOpen(true)
+  }
+
+  const handleAddDeliveryOrderConfirmYes = async () => {
+    const entries = getAddDeliveryOrderEntries()
+    const conflicts = []
+    const nonConflicting = []
+    for (const e of entries) {
+      const existing = deliveryOrders.find((r) => (r.deliveryOrderNo || '').trim() === (e.deliveryOrderNo || '').trim())
+      if (existing) conflicts.push({ existingRow: existing, newEntry: e })
+      else nonConflicting.push(e)
+    }
+    if (conflicts.length > 0) {
+      setAddDeliveryOrderConfirmOpen(false)
+      setOverwriteDeliveryOrderModal({ open: true, conflicts, nonConflicting, index: 0 })
+      return
+    }
+    for (const e of nonConflicting) {
+      const newRow = createDeliveryOrder({ deliveryOrderNo: e.deliveryOrderNo, deliveryOrderDate: e.deliveryOrderDate })
+      const inserted = await insertDeliveryOrder(newRow)
+      setDeliveryOrders((prev) => [...prev, inserted])
+    }
+    setAddDeliveryOrderFormOpen(false)
+    setAddDeliveryOrderConfirmOpen(false)
+    setAddDeliveryOrderRows([{ deliveryOrderNo: '', deliveryOrderDate: '' }])
+    setAddDeliveryOrderApplyDateToAll(false)
+  }
+
+  const getDeliveryOrderRowDisplay = (row) => {
+    const clerk = row.assignedClerkId ? employees.find((e) => e.id === row.assignedClerkId) : null
+    const salesman = row.assignedSalesmanId ? salesmen.find((s) => s.id === row.assignedSalesmanId) : null
+    const driver = row.assignedDriverId ? drivers.find((d) => d.id === row.assignedDriverId) : null
+    const transferWarehouse = row.transferWarehouseId ? warehouses.find((w) => w.id === row.transferWarehouseId) : null
+    const holdWarehouse = row.holdWarehouseId ? warehouses.find((w) => w.id === row.holdWarehouseId) : null
+    const assignedTo =
+      row.status === 'Preparing Delivery' || row.status === 'Billed'
+        ? 'Unassigned'
+        : row.status === STATUS_TRANSFER && transferWarehouse
+          ? transferWarehouse.name
+          : row.status === 'Hold - Warehouse' && holdWarehouse
+            ? holdWarehouse.name || 'Unassigned'
+            : STATUS_REQUIRES_CLERK.includes(row.status)
+              ? clerk?.name ?? 'Unassigned'
+              : STATUS_REQUIRES_SALESMAN.includes(row.status)
+                ? salesman?.name ?? 'Unassigned'
+                : row.status === 'Delivery In Progress'
+                  ? salesman?.name ?? driver?.name ?? 'Unassigned'
+                  : driver?.name ?? 'Unassigned'
+    const assignedDate =
+      row.deliveryDate && row.deliverySlot
+        ? `${formatDate(row.deliveryDate)} - ${row.deliverySlot}`
+        : row.deliveryDate
+          ? formatDate(row.deliveryDate)
+          : '–'
+    return { status: row.status, assignedTo, assignedDate }
+  }
+
+  const handleOverwriteDeliveryOrderYes = async () => {
+    const { conflicts, nonConflicting, index } = overwriteDeliveryOrderModal
+    const { existingRow, newEntry } = conflicts[index]
+    const resetPayload = {
+      deliveryOrderNo: newEntry.deliveryOrderNo,
+      deliveryOrderDate: newEntry.deliveryOrderDate,
+      status: 'Billed',
+      assignedDriverId: null,
+      assignedSalesmanId: null,
+      assignedClerkId: null,
+      deliveryDate: '',
+      deliverySlot: '',
+      transferWarehouseId: null,
+      holdWarehouseId: null,
+      holdWarehouseType: '',
+    }
+    updateRow(existingRow.id, resetPayload)
+    if (index + 1 < conflicts.length) {
+      setOverwriteDeliveryOrderModal((prev) => ({ ...prev, index: prev.index + 1 }))
+    } else {
+      for (const e of nonConflicting) {
+        const newRow = createDeliveryOrder({ deliveryOrderNo: e.deliveryOrderNo, deliveryOrderDate: e.deliveryOrderDate })
+        const inserted = await insertDeliveryOrder(newRow)
+        setDeliveryOrders((prev) => [...prev, inserted])
+      }
+      setOverwriteDeliveryOrderModal({ open: false, conflicts: [], nonConflicting: [], index: 0 })
+      setAddDeliveryOrderFormOpen(false)
+      setAddDeliveryOrderConfirmOpen(false)
+      setAddDeliveryOrderRows([{ deliveryOrderNo: '', deliveryOrderDate: '' }])
+      setAddDeliveryOrderApplyDateToAll(false)
+    }
+  }
+
+  const handleOverwriteDeliveryOrderNo = async () => {
+    const { conflicts, nonConflicting, index } = overwriteDeliveryOrderModal
+    if (index + 1 < conflicts.length) {
+      setOverwriteDeliveryOrderModal((prev) => ({ ...prev, index: prev.index + 1 }))
+    } else {
+      for (const e of nonConflicting) {
+        const newRow = createDeliveryOrder({ deliveryOrderNo: e.deliveryOrderNo, deliveryOrderDate: e.deliveryOrderDate })
+        const inserted = await insertDeliveryOrder(newRow)
+        setDeliveryOrders((prev) => [...prev, inserted])
+      }
+      setOverwriteDeliveryOrderModal({ open: false, conflicts: [], nonConflicting: [], index: 0 })
+      setAddDeliveryOrderFormOpen(false)
+      setAddDeliveryOrderConfirmOpen(false)
+      setAddDeliveryOrderRows([{ deliveryOrderNo: '', deliveryOrderDate: '' }])
+      setAddDeliveryOrderApplyDateToAll(false)
+    }
+  }
+
+  const handleAddDeliveryOrderConfirmNo = () => {
+    setAddDeliveryOrderConfirmOpen(false)
+  }
+
+  const handleAddDeliveryOrderFormClose = () => {
+    setAddDeliveryOrderFormOpen(false)
+    setAddDeliveryOrderConfirmOpen(false)
+    setOverwriteDeliveryOrderModal({ open: false, conflicts: [], nonConflicting: [], index: 0 })
+    setAddDeliveryOrderRows([{ deliveryOrderNo: '', deliveryOrderDate: '' }])
+    setAddDeliveryOrderApplyDateToAll(false)
   }
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-end gap-4">
+      <div className="flex items-center justify-between gap-4">
+        <button
+          type="button"
+          onClick={() => {
+            setAddDeliveryOrderFormOpen(true)
+            setAddDeliveryOrderConfirmOpen(false)
+            setAddDeliveryOrderRows(addDeliveryOrderMultiple ? Array(10).fill(null).map(() => ({ deliveryOrderNo: '', deliveryOrderDate: '' })) : [{ deliveryOrderNo: '', deliveryOrderDate: '' }])
+            setAddDeliveryOrderApplyDateToAll(false)
+          }}
+          className="inline-flex items-center gap-2 px-4 py-2 bg-blue-900 text-white rounded-lg hover:bg-blue-800 text-sm font-medium"
+        >
+          <Plus size={18} />
+          Add New Delivery Order
+        </button>
         <label className="flex items-center gap-2 cursor-pointer">
           <span className="text-sm font-medium text-slate-700">Test Mode</span>
           <button
@@ -948,21 +1236,11 @@ export default function InvoiceTrackingPage() {
             />
           </button>
         </label>
-        {testMode && (
-          <button
-            type="button"
-            onClick={handleAddInvoiceRow}
-            className="inline-flex items-center gap-2 px-4 py-2 bg-blue-900 text-white rounded-lg hover:bg-blue-800 text-sm font-medium"
-          >
-            <Plus size={18} />
-            Add row
-          </button>
-        )}
       </div>
 
       <div className="bg-white rounded-lg shadow border border-slate-200 overflow-x-auto">
-        {invoicesLoading ? (
-          <div className="p-8 text-center text-slate-500">Loading invoices…</div>
+        {deliveryOrdersLoading ? (
+          <div className="p-8 text-center text-slate-500">Loading delivery orders…</div>
         ) : (
         <table className="w-full min-w-[900px] text-sm">
           <thead>
@@ -970,18 +1248,18 @@ export default function InvoiceTrackingPage() {
               <th className="text-left py-3 px-4 font-semibold text-slate-700 w-12">
                 <input
                   type="checkbox"
-                  checked={invoices.length > 0 && selectedInvoiceIds.length === invoices.length}
+                  checked={deliveryOrders.length > 0 && selectedInvoiceIds.length === deliveryOrders.length}
                   onChange={(e) => {
-                    if (e.target.checked) setSelectedInvoiceIds(invoices.map((r) => r.id))
+                    if (e.target.checked) setSelectedInvoiceIds(deliveryOrders.map((r) => r.id))
                     else setSelectedInvoiceIds([])
                   }}
                   onClick={(e) => e.stopPropagation()}
                   className="rounded border-slate-300 text-blue-900 focus:ring-blue-900"
-                  aria-label="Select all invoices"
+                  aria-label="Select all delivery orders"
                 />
               </th>
-              <th className="text-left py-3 px-4 font-semibold text-slate-700">Invoice No</th>
-              <th className="text-left py-3 px-4 font-semibold text-slate-700">Date of Invoice</th>
+              <th className="text-left py-3 px-4 font-semibold text-slate-700">Delivery Order No</th>
+              <th className="text-left py-3 px-4 font-semibold text-slate-700">Delivery Order Date</th>
               <th className="text-left py-3 px-4 font-semibold text-slate-700">Status</th>
               <th className="text-left py-3 px-4 font-semibold text-slate-700">Assigned To</th>
               <th className="text-left py-3 px-4 font-semibold text-slate-700">Assigned Date</th>
@@ -991,7 +1269,7 @@ export default function InvoiceTrackingPage() {
             </tr>
           </thead>
           <tbody>
-            {invoices.map((row) => {
+            {deliveryOrders.map((row) => {
               const salesman = row.assignedSalesmanId
                 ? salesmen.find((s) => s.id === row.assignedSalesmanId)
                 : null
@@ -1099,53 +1377,18 @@ export default function InvoiceTrackingPage() {
                       }}
                       onClick={(e) => e.stopPropagation()}
                       className="rounded border-slate-300 text-blue-900 focus:ring-blue-900"
-                      aria-label={`Select invoice ${row.invoiceNo || row.id}`}
+                      aria-label={`Select delivery order ${row.deliveryOrderNo || row.id}`}
                     />
                   </td>
                   <td className="py-2 px-4">
-                    <input
-                      type="text"
-                      value={row.invoiceNo}
-                      onChange={(e) => updateRow(row.id, { invoiceNo: e.target.value })}
-                      readOnly={!canEditRow}
-                      className={`w-full max-w-[120px] py-1.5 px-2 border rounded ${
-                        canEditRow
-                          ? 'border-slate-300 focus:ring-2 focus:ring-blue-900'
-                          : 'border-transparent bg-transparent read-only:bg-transparent'
-                      }`}
-                    />
+                    <span className="py-1.5 px-2 block text-slate-700">
+                      {row.deliveryOrderNo || '–'}
+                    </span>
                   </td>
                   <td className="py-2 px-4">
-                    {canEditRow ? (
-                      invoiceDatePickerRow === row.id ? (
-                        <input
-                          type="date"
-                          defaultValue={toInputDate(row.dateOfInvoice)}
-                          onBlur={(e) => {
-                            const v = e.target.value
-                            if (v) handleInvoiceDateChange(row.id, v)
-                            setInvoiceDatePickerRow(null)
-                          }}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Escape') setInvoiceDatePickerRow(null)
-                          }}
-                          autoFocus
-                          className="py-1.5 px-2 border border-slate-300 rounded focus:ring-2 focus:ring-blue-900 max-w-[140px]"
-                        />
-                      ) : (
-                        <button
-                          type="button"
-                          onClick={() => setInvoiceDatePickerRow(row.id)}
-                          className="text-left py-1.5 px-2 rounded hover:bg-slate-100 min-w-[100px]"
-                        >
-                          {row.dateOfInvoice ? formatDate(row.dateOfInvoice) : 'Select date'}
-                        </button>
-                      )
-                    ) : (
-                      <span className="py-1.5 px-2 block text-slate-700">
-                        {row.dateOfInvoice ? formatDate(row.dateOfInvoice) : '–'}
-                      </span>
-                    )}
+                    <span className="py-1.5 px-2 block text-slate-700">
+                      {row.deliveryOrderDate ? formatDate(row.deliveryOrderDate) : '–'}
+                    </span>
                   </td>
                   <td className="py-2 px-4">
                     {isCompletedLocked ? (
@@ -1292,11 +1535,313 @@ export default function InvoiceTrackingPage() {
         )}
       </div>
 
+      {/* Add New Delivery Order - Form */}
+      {addDeliveryOrderFormOpen && !addDeliveryOrderConfirmOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50" onClick={handleAddDeliveryOrderFormClose}>
+          <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-auto p-6" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-lg font-semibold text-slate-800 mb-4">Add New Delivery Order</h3>
+            <label className="flex items-center gap-2 mb-4 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={addDeliveryOrderMultiple}
+                onChange={(e) => handleAddDeliveryOrderMultipleToggle(e.target.checked)}
+                className="rounded border-slate-300 text-blue-900 focus:ring-blue-900"
+              />
+              <span className="text-sm text-slate-700">Add In Multiple</span>
+            </label>
+            {!addDeliveryOrderMultiple ? (
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Delivery Order No</label>
+                  <input
+                    type="text"
+                    value={addDeliveryOrderRows[0]?.deliveryOrderNo || ''}
+                    onChange={(e) => setAddDeliveryOrderRow(0, 'deliveryOrderNo', e.target.value)}
+                    className="w-full py-2 px-3 border border-slate-300 rounded focus:ring-2 focus:ring-blue-900"
+                    placeholder="e.g. DO-001"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Delivery Order Date</label>
+                  <input
+                    type="date"
+                    value={addDeliveryOrderRows[0]?.deliveryOrderDate || ''}
+                    onChange={(e) => setAddDeliveryOrderRow(0, 'deliveryOrderDate', e.target.value)}
+                    className="w-full py-2 px-3 border border-slate-300 rounded focus:ring-2 focus:ring-blue-900"
+                  />
+                </div>
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm border border-slate-200">
+                  <thead>
+                    <tr className="bg-slate-100">
+                      <th className="text-left py-2 px-3 font-semibold text-slate-700">Delivery Order No</th>
+                      <th className="text-left py-2 px-3 font-semibold text-slate-700">Delivery Order Date</th>
+                      <th className="text-left py-2 px-3 font-semibold text-slate-700 w-28">
+                        <label className="flex items-center gap-1 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={addDeliveryOrderApplyDateToAll}
+                            onChange={(e) => handleAddDeliveryOrderApplyDateToAllChange(e.target.checked)}
+                            className="rounded border-slate-300 text-blue-900 focus:ring-blue-900"
+                          />
+                          Apply To All
+                        </label>
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {addDeliveryOrderRows.map((row, i) => (
+                      <tr key={i} className="border-t border-slate-200">
+                        <td className="py-2 px-3">
+                          <input
+                            type="text"
+                            value={row.deliveryOrderNo}
+                            onChange={(e) => setAddDeliveryOrderRow(i, 'deliveryOrderNo', e.target.value)}
+                            className="w-full py-1.5 px-2 border border-slate-300 rounded text-sm"
+                            placeholder={`No. ${i + 1}`}
+                          />
+                        </td>
+                        <td className="py-2 px-3">
+                          <input
+                            type="date"
+                            value={addDeliveryOrderApplyDateToAll ? (addDeliveryOrderRows[0]?.deliveryOrderDate || '') : row.deliveryOrderDate}
+                            onChange={(e) => setAddDeliveryOrderRow(i, 'deliveryOrderDate', e.target.value)}
+                            disabled={addDeliveryOrderApplyDateToAll && i > 0}
+                            className={`w-full py-1.5 px-2 border rounded text-sm ${addDeliveryOrderApplyDateToAll && i > 0 ? 'bg-slate-100 border-slate-200' : 'border-slate-300'}`}
+                          />
+                        </td>
+                        <td className="py-2 px-3" />
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            <div className="flex justify-end gap-2 mt-6">
+              <button type="button" onClick={handleAddDeliveryOrderFormClose} className="px-4 py-2 border border-slate-300 rounded-lg hover:bg-slate-50">Cancel</button>
+              <button type="button" onClick={handleAddDeliveryOrderProceed} className="px-4 py-2 bg-blue-900 text-white rounded-lg hover:bg-blue-800">Done</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Add New Delivery Order - Confirm */}
+      {addDeliveryOrderFormOpen && addDeliveryOrderConfirmOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50" onClick={handleAddDeliveryOrderConfirmNo}>
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full max-h-[90vh] overflow-auto p-6" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-lg font-semibold text-slate-800 mb-2">Confirm new delivery orders</h3>
+            <p className="text-slate-600 text-sm mb-4">Please confirm the following. Is all correct?</p>
+            <ul className="border border-slate-200 rounded-lg divide-y divide-slate-200 mb-6 max-h-60 overflow-y-auto">
+              {getAddDeliveryOrderEntries().map((e, i) => (
+                <li key={i} className="py-2 px-3 flex justify-between text-sm">
+                  <span className="font-medium text-slate-800">{e.deliveryOrderNo}</span>
+                  <span className="text-slate-600">{e.deliveryOrderDate ? formatDate(e.deliveryOrderDate) : '–'}</span>
+                </li>
+              ))}
+            </ul>
+            <div className="flex justify-end gap-2">
+              <button type="button" onClick={handleAddDeliveryOrderConfirmNo} className="px-4 py-2 border border-slate-300 rounded-lg hover:bg-slate-50">No</button>
+              <button type="button" onClick={handleAddDeliveryOrderConfirmYes} className="px-4 py-2 bg-blue-900 text-white rounded-lg hover:bg-blue-800">Yes</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Overwrite existing Delivery Order */}
+      {overwriteDeliveryOrderModal.open && overwriteDeliveryOrderModal.conflicts[overwriteDeliveryOrderModal.index] && (() => {
+        const { existingRow, newEntry } = overwriteDeliveryOrderModal.conflicts[overwriteDeliveryOrderModal.index]
+        const existingDisplay = getDeliveryOrderRowDisplay(existingRow)
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50" onClick={() => handleOverwriteDeliveryOrderNo()}>
+            <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-auto p-6" onClick={(e) => e.stopPropagation()}>
+              <h3 className="text-lg font-semibold text-slate-800 mb-2">Delivery order already exists</h3>
+              <p className="text-slate-600 text-sm mb-4">
+                <strong>{newEntry.deliveryOrderNo}</strong> already exists. Do you want to overwrite it? Once overwrite, you may lose the progress of the existing delivery order.
+              </p>
+              <div className="grid grid-cols-2 gap-4 mb-6">
+                <div className="border border-slate-200 rounded-lg p-3 bg-slate-50">
+                  <p className="text-xs font-semibold text-slate-500 uppercase mb-2">Existing</p>
+                  <table className="text-sm w-full">
+                    <tbody>
+                      <tr><td className="text-slate-500 py-1 pr-2">Delivery Order No</td><td className="font-medium">{existingRow.deliveryOrderNo || '–'}</td></tr>
+                      <tr><td className="text-slate-500 py-1 pr-2">Delivery Order Date</td><td>{existingRow.deliveryOrderDate ? formatDate(existingRow.deliveryOrderDate) : '–'}</td></tr>
+                      <tr><td className="text-slate-500 py-1 pr-2">Status</td><td>{existingDisplay.status}</td></tr>
+                      <tr><td className="text-slate-500 py-1 pr-2">Assigned To</td><td>{existingDisplay.assignedTo}</td></tr>
+                      <tr><td className="text-slate-500 py-1 pr-2">Assigned Date</td><td>{existingDisplay.assignedDate}</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div className="border border-slate-200 rounded-lg p-3 bg-blue-50/50">
+                  <p className="text-xs font-semibold text-slate-500 uppercase mb-2">New</p>
+                  <table className="text-sm w-full">
+                    <tbody>
+                      <tr><td className="text-slate-500 py-1 pr-2">Delivery Order No</td><td className="font-medium">{newEntry.deliveryOrderNo || '–'}</td></tr>
+                      <tr><td className="text-slate-500 py-1 pr-2">Delivery Order Date</td><td>{newEntry.deliveryOrderDate ? formatDate(newEntry.deliveryOrderDate) : '–'}</td></tr>
+                      <tr><td className="text-slate-500 py-1 pr-2">Status</td><td>Billed</td></tr>
+                      <tr><td className="text-slate-500 py-1 pr-2">Assigned To</td><td>–</td></tr>
+                      <tr><td className="text-slate-500 py-1 pr-2">Assigned Date</td><td>–</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+              <div className="flex justify-end gap-2">
+                <button type="button" onClick={handleOverwriteDeliveryOrderNo} className="px-4 py-2 border border-slate-300 rounded-lg hover:bg-slate-50">No</button>
+                <button type="button" onClick={handleOverwriteDeliveryOrderYes} className="px-4 py-2 bg-blue-900 text-white rounded-lg hover:bg-blue-800">Yes</button>
+              </div>
+            </div>
+          </div>
+        )
+      })()}
+
       <DeliverySlotModal
         isOpen={deliveryModal.open}
         dateLabel={deliveryModal.dateLabel}
         onClose={() => setDeliveryModal({ open: false, rowId: null, dateLabel: '' })}
         onSelect={handleDeliverySlotSelect}
+      />
+
+      {attachmentModal.open && createPortal(
+        <div className="fixed inset-0 z-[9999]" style={{ pointerEvents: 'auto' }}>
+          <div
+            className="absolute inset-0 bg-black/50"
+            aria-hidden
+            onClick={(e) => { if (e.target === e.currentTarget) handleAttachmentCancel() }}
+          />
+          <div className="absolute inset-0 flex items-center justify-center p-4" style={{ pointerEvents: 'none' }}>
+            <div
+              className="bg-white rounded-lg shadow-xl max-w-sm w-full p-6 relative"
+              style={{ pointerEvents: 'auto' }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <h3 className="text-lg font-semibold text-slate-800 mb-3">Add attachment</h3>
+              <p className="text-slate-600 text-sm mb-4">Select one option:</p>
+              <div className="space-y-2 mb-4">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="radio"
+                    name="attachmentType"
+                    checked={attachmentType === 'original'}
+                    onChange={() => setAttachmentType('original')}
+                    className="border-slate-300 text-blue-900 focus:ring-blue-900"
+                  />
+                  <span className="text-sm text-slate-700">Attach Original Invoice</span>
+                </label>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="radio"
+                    name="attachmentType"
+                    checked={attachmentType === 'copy'}
+                    onChange={() => setAttachmentType('copy')}
+                    className="border-slate-300 text-blue-900 focus:ring-blue-900"
+                  />
+                  <span className="text-sm text-slate-700">Attach Copy Invoice</span>
+                </label>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="radio"
+                    name="attachmentType"
+                    checked={attachmentType === 'none'}
+                    onChange={() => setAttachmentType('none')}
+                    className="border-slate-300 text-blue-900 focus:ring-blue-900"
+                  />
+                  <span className="text-sm text-slate-700">No Attachment</span>
+                </label>
+              </div>
+              <div className="flex gap-2 justify-end">
+                <button
+                  type="button"
+                  onClick={handleAttachmentCancel}
+                  className="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleAttachmentOk}
+                  className="px-6 py-2 bg-blue-900 text-white rounded-lg hover:bg-blue-800 font-medium"
+                >
+                  OK
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
+
+      {invoiceSearchModal.open && createPortal(
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4 bg-black/50" onClick={handleInvoiceSearchCancel}>
+          <div
+            className="bg-white rounded-lg shadow-xl max-w-md w-full max-h-[85vh] overflow-hidden flex flex-col p-6"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-lg font-semibold text-slate-800 mb-2">Search invoice</h3>
+            <p className="text-slate-600 text-sm mb-3">Enter invoice number (from Invoice Tracking list):</p>
+            <input
+              type="text"
+              value={invoiceSearchQuery}
+              onChange={(e) => {
+                setInvoiceSearchQuery(e.target.value)
+                setInvoiceSearchSelectedId(null)
+              }}
+              placeholder="e.g. INV-001"
+              className="w-full py-2 px-3 border border-slate-300 rounded focus:ring-2 focus:ring-blue-900 mb-3"
+              aria-label="Invoice number search"
+            />
+            <div className="border border-slate-200 rounded overflow-auto flex-1 min-h-[120px] max-h-[200px] mb-4">
+              {getFilteredInvoicesForSearch().length === 0 ? (
+                <div className="p-4 text-slate-500 text-sm text-center">
+                  {invoiceSearchList.length === 0 ? 'No invoices in list.' : 'No match. Type to search.'}
+                </div>
+              ) : (
+                <ul className="divide-y divide-slate-100">
+                  {getFilteredInvoicesForSearch().map((inv) => (
+                    <li key={inv.id}>
+                      <button
+                        type="button"
+                        onClick={() => setInvoiceSearchSelectedId(inv.id)}
+                        className={`w-full text-left py-2 px-3 text-sm hover:bg-slate-50 ${
+                          invoiceSearchSelectedId === inv.id ? 'bg-blue-50 text-blue-900 font-medium' : 'text-slate-700'
+                        }`}
+                      >
+                        {inv.invoiceNo || inv.id}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+            <p className="text-slate-500 text-xs mb-3">
+              {invoiceSearchSelectedId ? 'Selected: ' + (invoiceSearchList.find((r) => r.id === invoiceSearchSelectedId)?.invoiceNo || invoiceSearchSelectedId) : 'Select an invoice to confirm.'}
+            </p>
+            <div className="flex gap-2 justify-end">
+              <button
+                type="button"
+                onClick={handleInvoiceSearchCancel}
+                className="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleInvoiceSearchConfirm}
+                disabled={!(invoiceSearchSelectedId || getFilteredInvoicesForSearch().length === 1)}
+                className="px-6 py-2 bg-blue-900 text-white rounded-lg hover:bg-blue-800 font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Confirm invoice selected
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
+
+      <NoticeModal
+        isOpen={invoiceAttachedNotice.open}
+        message={invoiceAttachedNotice.message}
+        onClose={() => setInvoiceAttachedNotice({ open: false, message: '' })}
       />
 
       <DiscrepancyModal
@@ -1655,15 +2200,15 @@ export default function InvoiceTrackingPage() {
             className="bg-white rounded-lg shadow-xl max-w-md w-full p-6"
             onClick={(e) => e.stopPropagation()}
           >
-            <h3 className="text-lg font-semibold text-slate-800 mb-3">Apply to selected invoices?</h3>
+            <h3 className="text-lg font-semibold text-slate-800 mb-3">Apply to selected delivery orders?</h3>
             <p className="text-slate-600 text-sm mb-2">
               Are you sure you want to apply this to the following?
             </p>
             <ul className="text-slate-700 text-sm mb-4 max-h-40 overflow-y-auto list-disc list-inside">
               {bulkApplyConfirmModal.rowIds.map((id) => {
-                const inv = invoices.find((r) => r.id === id)
+                const inv = deliveryOrders.find((r) => r.id === id)
                 return (
-                  <li key={id}>{inv?.invoiceNo || id}</li>
+                  <li key={id}>{inv?.deliveryOrderNo || id}</li>
                 )
               })}
             </ul>

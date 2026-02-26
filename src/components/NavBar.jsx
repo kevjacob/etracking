@@ -3,8 +3,9 @@ import { Home, FileText, Megaphone, BarChart3, Wrench, ChevronDown } from 'lucid
 
 const eTrackingItems = [
   { label: 'Invoice Tracking', path: '/etracking/invoice' },
-  { label: 'Credit Note Tracking', path: null },
-  { label: 'Delivery Order Tracking', path: null },
+  { label: 'Credit Note Tracking', path: '/etracking/credit-note' },
+  { label: 'Delivery Order Tracking', path: '/etracking/delivery-order' },
+  { label: 'GRN Tracking', path: '/etracking/grn' },
 ]
 
 const reportItems = [

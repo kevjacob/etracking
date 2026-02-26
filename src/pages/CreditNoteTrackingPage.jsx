@@ -4,7 +4,7 @@ import { Trash2, Plus } from 'lucide-react'
 import { useEmployees } from '../context/EmployeesContext'
 import { useWarehouses } from '../context/WarehousesContext'
 import { formatDate, toInputDate, parseDate } from '../utils/dateFormat'
-import { fetchInvoices, insertInvoice, updateInvoice, deleteInvoice } from '../api/invoices'
+import { fetchCreditNotes, insertCreditNote, updateCreditNote, deleteCreditNote } from '../api/creditNotes'
 import DeliverySlotModal from '../components/DeliverySlotModal'
 import DiscrepancyModal from '../components/DiscrepancyModal'
 import SelectSalesmanModal from '../components/SelectSalesmanModal'
@@ -78,11 +78,12 @@ const PHASE_4_LOCKED_MSG = 'This Status can no longer be changed as the order ha
 
 const defaultDiscrepancy = () => ({ checked: false, title: '', description: '' })
 
-function createInvoice(overrides = {}) {
+function createCreditNote(overrides = {}) {
   return {
     id: String(Date.now() + Math.random()),
-    invoiceNo: '',
-    dateOfInvoice: '',
+    creditNoteNo: '',
+    creditNoteDate: '',
+    numberAndDateLocked: false,
     status: 'Billed',
     assignedDriverId: null,
     assignedSalesmanId: null,
@@ -99,14 +100,25 @@ function createInvoice(overrides = {}) {
   }
 }
 
-export default function InvoiceTrackingPage() {
+export default function CreditNoteTrackingPage() {
   const { employees } = useEmployees()
   const { warehouses } = useWarehouses()
   const drivers = employees.filter((e) => e.position === 'Lorry Driver')
   const salesmen = employees.filter((e) => e.position === 'Salesman')
   const [testMode, setTestMode] = useState(false)
-  const [invoices, setInvoices] = useState([])
-  const [invoicesLoading, setInvoicesLoading] = useState(true)
+  const [creditNotes, setCreditNotes] = useState([])
+  const [creditNotesLoading, setCreditNotesLoading] = useState(true)
+  const [addCreditNoteFormOpen, setAddCreditNoteFormOpen] = useState(false)
+  const [addCreditNoteMultiple, setAddCreditNoteMultiple] = useState(false)
+  const [addCreditNoteRows, setAddCreditNoteRows] = useState([{ creditNoteNo: '', creditNoteDate: '' }])
+  const [addCreditNoteApplyDateToAll, setAddCreditNoteApplyDateToAll] = useState(false)
+  const [addCreditNoteConfirmOpen, setAddCreditNoteConfirmOpen] = useState(false)
+  const [overwriteCreditNoteModal, setOverwriteCreditNoteModal] = useState({
+    open: false,
+    conflicts: [],
+    nonConflicting: [],
+    index: 0,
+  })
   const [deliveryModal, setDeliveryModal] = useState({ open: false, rowId: null, dateLabel: '' })
   const [discrepancyModal, setDiscrepancyModal] = useState({
     open: false,
@@ -115,7 +127,7 @@ export default function InvoiceTrackingPage() {
     description: '',
   })
   const [datePickerRow, setDatePickerRow] = useState(null)
-  const [invoiceDatePickerRow, setInvoiceDatePickerRow] = useState(null)
+  const [creditNoteDatePickerRow, setCreditNoteDatePickerRow] = useState(null)
   const [salesmanModal, setSalesmanModal] = useState({ open: false, rowId: null, previousStatus: '' })
   const [clerkModal, setClerkModal] = useState({ open: false, rowId: null, previousStatus: '' })
   const [warehouseModal, setWarehouseModal] = useState({ open: false, rowId: null, previousStatus: '' })
@@ -190,74 +202,74 @@ export default function InvoiceTrackingPage() {
   })
   const pendingBulkRowIdsRef = useRef(null)
 
-  const loadInvoices = useCallback(async () => {
-    setInvoicesLoading(true)
+  const loadCreditNotes = useCallback(async () => {
+    setCreditNotesLoading(true)
     try {
-      const data = await fetchInvoices()
+      const data = await fetchCreditNotes()
       if (data.length === 0) {
         const samples = [
-          createInvoice({ invoiceNo: 'INV-001', dateOfInvoice: '2025-02-20' }),
-          createInvoice({ invoiceNo: 'INV-002', dateOfInvoice: '2025-02-21' }),
-          createInvoice({ invoiceNo: 'INV-003', dateOfInvoice: '2025-02-22' }),
-          createInvoice({ invoiceNo: 'INV-004', dateOfInvoice: '2025-02-23' }),
-          createInvoice({ invoiceNo: 'INV-005', dateOfInvoice: '2025-02-24' }),
+          createCreditNote({ creditNoteNo: 'CN-001', creditNoteDate: '2025-02-20' }),
+          createCreditNote({ creditNoteNo: 'CN-002', creditNoteDate: '2025-02-21' }),
+          createCreditNote({ creditNoteNo: 'CN-003', creditNoteDate: '2025-02-22' }),
+          createCreditNote({ creditNoteNo: 'CN-004', creditNoteDate: '2025-02-23' }),
+          createCreditNote({ creditNoteNo: 'CN-005', creditNoteDate: '2025-02-24' }),
         ]
         const inserted = []
         for (const row of samples) {
-          const saved = await insertInvoice(row)
+          const saved = await insertCreditNote(row)
           inserted.push(saved)
         }
-        setInvoices(inserted)
+        setCreditNotes(inserted)
       } else {
-        setInvoices(data)
+        setCreditNotes(data)
       }
     } catch (e) {
-      console.error('Fetch invoices error:', e)
+      console.error('Fetch creditNotes error:', e)
       try {
         const samples = [
-          createInvoice({ invoiceNo: 'INV-001', dateOfInvoice: '2025-02-20' }),
-          createInvoice({ invoiceNo: 'INV-002', dateOfInvoice: '2025-02-21' }),
-          createInvoice({ invoiceNo: 'INV-003', dateOfInvoice: '2025-02-22' }),
-          createInvoice({ invoiceNo: 'INV-004', dateOfInvoice: '2025-02-23' }),
-          createInvoice({ invoiceNo: 'INV-005', dateOfInvoice: '2025-02-24' }),
+          createCreditNote({ creditNoteNo: 'CN-001', creditNoteDate: '2025-02-20' }),
+          createCreditNote({ creditNoteNo: 'CN-002', creditNoteDate: '2025-02-21' }),
+          createCreditNote({ creditNoteNo: 'CN-003', creditNoteDate: '2025-02-22' }),
+          createCreditNote({ creditNoteNo: 'CN-004', creditNoteDate: '2025-02-23' }),
+          createCreditNote({ creditNoteNo: 'CN-005', creditNoteDate: '2025-02-24' }),
         ]
         const inserted = []
         for (const row of samples) {
-          const saved = await insertInvoice(row)
+          const saved = await insertCreditNote(row)
           inserted.push(saved)
         }
-        setInvoices(inserted)
+        setCreditNotes(inserted)
       } catch (e2) {
-        setInvoices([
-          createInvoice({ invoiceNo: 'INV-001', dateOfInvoice: '2025-02-20' }),
-          createInvoice({ invoiceNo: 'INV-002', dateOfInvoice: '2025-02-21' }),
-          createInvoice({ invoiceNo: 'INV-003', dateOfInvoice: '2025-02-22' }),
-          createInvoice({ invoiceNo: 'INV-004', dateOfInvoice: '2025-02-23' }),
-          createInvoice({ invoiceNo: 'INV-005', dateOfInvoice: '2025-02-24' }),
+        setCreditNotes([
+          createCreditNote({ creditNoteNo: 'CN-001', creditNoteDate: '2025-02-20' }),
+          createCreditNote({ creditNoteNo: 'CN-002', creditNoteDate: '2025-02-21' }),
+          createCreditNote({ creditNoteNo: 'CN-003', creditNoteDate: '2025-02-22' }),
+          createCreditNote({ creditNoteNo: 'CN-004', creditNoteDate: '2025-02-23' }),
+          createCreditNote({ creditNoteNo: 'CN-005', creditNoteDate: '2025-02-24' }),
         ])
       }
     }
-    setInvoicesLoading(false)
+    setCreditNotesLoading(false)
   }, [])
 
   useEffect(() => {
-    loadInvoices()
-  }, [loadInvoices])
+    loadCreditNotes()
+  }, [loadCreditNotes])
 
   const updateRow = (id, updates) => {
-    setInvoices((prev) => {
+    setCreditNotes((prev) => {
       const next = prev.map((row) => (row.id === id ? { ...row, ...updates } : row))
       const row = next.find((r) => r.id === id)
       if (!row) return next
       // Local storage: always persist (no testMode gate)
       if (isLocalId(id)) {
-        updateInvoice(id, row).catch((e) => console.error('Update invoice error:', e))
+        updateCreditNote(id, row).catch((e) => console.error('Update credit note error:', e))
       } else {
-        insertInvoice(row)
+        insertCreditNote(row)
           .then((inserted) => {
-            setInvoices((p) => p.map((r) => (r.id === id ? inserted : r)))
+            setCreditNotes((p) => p.map((r) => (r.id === id ? inserted : r)))
           })
-          .catch((e) => console.error('Insert invoice error:', e))
+          .catch((e) => console.error('Insert credit note error:', e))
       }
       return next
     })
@@ -265,9 +277,9 @@ export default function InvoiceTrackingPage() {
 
   const deleteRow = (id) => {
     if (!testMode) return
-    deleteInvoice(id)
-      .then(() => setInvoices((prev) => prev.filter((row) => row.id !== id)))
-      .catch((e) => console.error('Delete invoice error:', e))
+    deleteCreditNote(id)
+      .then(() => setCreditNotes((prev) => prev.filter((row) => row.id !== id)))
+      .catch((e) => console.error('Delete credit note error:', e))
   }
 
   const isBulkApply = () => {
@@ -313,7 +325,7 @@ export default function InvoiceTrackingPage() {
     const parsed = parseDate(value)
     if (!parsed) return
     setDatePickerRow(null)
-    const row = invoices.find((r) => r.id === rowId)
+    const row = creditNotes.find((r) => r.id === rowId)
     const isHoldOrChopSign =
       row?.status?.startsWith('Hold -') || row?.status?.startsWith('Chop & Sign -')
     if (isHoldOrChopSign) {
@@ -324,16 +336,16 @@ export default function InvoiceTrackingPage() {
     updateRow(rowId, { deliveryDate: parsed, deliverySlot: '' })
   }
 
-  const handleInvoiceDateChange = (rowId, value) => {
+  const handleCreditNoteDateChange = (rowId, value) => {
     const parsed = parseDate(value)
-    if (parsed) updateRow(rowId, { dateOfInvoice: parsed })
-    setInvoiceDatePickerRow(null)
+    if (parsed) updateRow(rowId, { creditNoteDate: parsed })
+    setCreditNoteDatePickerRow(null)
   }
 
   const handleDeliverySlotSelect = (slot) => {
     if (!deliveryModal.rowId) return
     const displaySlot = slot === 'Afternoon' ? 'Noon' : slot
-    const row = invoices.find((r) => r.id === deliveryModal.rowId)
+    const row = creditNotes.find((r) => r.id === deliveryModal.rowId)
     const payload = row
       ? {
           status: row.status,
@@ -351,7 +363,7 @@ export default function InvoiceTrackingPage() {
 
   const handleDiscrepancyCheck = (rowId, checked) => {
     if (checked) {
-      const row = invoices.find((r) => r.id === rowId)
+      const row = creditNotes.find((r) => r.id === rowId)
       updateRow(rowId, { discrepancy: { ...row.discrepancy, checked: true } })
       setDiscrepancyModal({
         open: true,
@@ -377,7 +389,7 @@ export default function InvoiceTrackingPage() {
   }
 
   const handleStatusChange = (rowId, newStatus, previousStatus) => {
-    const row = invoices.find((r) => r.id === rowId)
+    const row = creditNotes.find((r) => r.id === rowId)
     if (newStatus === row.status) {
       setSameStatusConfirmModal({ open: true, rowId, status: newStatus })
       return
@@ -486,7 +498,7 @@ export default function InvoiceTrackingPage() {
   const handleSalesmanSelect = (rowId, salesmanId) => {
     updateRow(rowId, { assignedSalesmanId: salesmanId })
     setSalesmanModal({ open: false, rowId: null, previousStatus: '' })
-    const row = invoices.find((r) => r.id === rowId)
+    const row = creditNotes.find((r) => r.id === rowId)
     assignDatePendingRef.current = { rowId, fromDriver: false }
     setAssignDateModal({
       open: true,
@@ -504,7 +516,7 @@ export default function InvoiceTrackingPage() {
   const handleClerkSelect = (rowId, clerkId) => {
     updateRow(rowId, { assignedClerkId: clerkId })
     setClerkModal({ open: false, rowId: null, previousStatus: '' })
-    const row = invoices.find((r) => r.id === rowId)
+    const row = creditNotes.find((r) => r.id === rowId)
     assignDatePendingRef.current = { rowId, fromDriver: false }
     setAssignDateModal({
       open: true,
@@ -572,7 +584,7 @@ export default function InvoiceTrackingPage() {
       fromChopSignWarehouse: false,
       fromChopSignNoFlow: { rowId, warehouseId },
     }
-    const row = invoices.find((r) => r.id === rowId)
+    const row = creditNotes.find((r) => r.id === rowId)
     setAssignDateModal({
       open: true,
       rowId,
@@ -587,7 +599,7 @@ export default function InvoiceTrackingPage() {
 
   const handleHoldWarehouseTypeSelect = (type) => {
     const { rowId, warehouseId } = holdWarehouseTypeModal
-    const row = invoices.find((r) => r.id === rowId)
+    const row = creditNotes.find((r) => r.id === rowId)
     const currentRemark = row?.remark?.trim() || ''
     const newRemark = currentRemark ? `${currentRemark} / ${type}` : type
     const payload = {
@@ -661,7 +673,7 @@ export default function InvoiceTrackingPage() {
 
   const handleBacktrackPhase2To1Yes = () => {
     const { rowId } = backtrackPhase2To1Modal
-    const row = invoices.find((r) => r.id === rowId)
+    const row = creditNotes.find((r) => r.id === rowId)
     const payload = rowId && row ? {
       status: 'Billed',
       assignedDriverId: null,
@@ -736,7 +748,7 @@ export default function InvoiceTrackingPage() {
       setPhase4BacktrackModal({ open: false, rowId: null, newStatus: '', previousStatus: '' })
       return
     }
-    const row = invoices.find((r) => r.id === rowId)
+    const row = creditNotes.find((r) => r.id === rowId)
     const resetPayload = {
       status: newStatus,
       assignedDriverId: null,
@@ -816,7 +828,7 @@ export default function InvoiceTrackingPage() {
       if (rowIdToUse) {
         if (fromChopSignNoFlow) {
           const { warehouseId } = fromChopSignNoFlow
-          const row = invoices.find((r) => r.id === rowIdToUse)
+          const row = creditNotes.find((r) => r.id === rowIdToUse)
           const currentRemark = row?.remark?.trim() || ''
           const newRemark = currentRemark ? `${currentRemark} / Chop & Sign` : 'Chop & Sign'
           const payload = {
@@ -833,7 +845,7 @@ export default function InvoiceTrackingPage() {
           return
         }
         if (fromChopSignWarehouse) {
-          const row = invoices.find((r) => r.id === rowIdToUse)
+          const row = creditNotes.find((r) => r.id === rowIdToUse)
           const currentRemark = row?.remark?.trim() || ''
           const newRemark = currentRemark ? `${currentRemark} / Chop & Sign` : 'Chop & Sign'
           const payload = {
@@ -850,7 +862,7 @@ export default function InvoiceTrackingPage() {
         if (fromDriver) {
           setDeliveryModal({ open: true, rowId: rowIdToUse, dateLabel: formatDate(dateToSave) })
         } else {
-          const leadRow = invoices.find((r) => r.id === rowIdToUse)
+          const leadRow = creditNotes.find((r) => r.id === rowIdToUse)
           const payload = leadRow
             ? {
                 status: leadRow.status,
@@ -898,7 +910,7 @@ export default function InvoiceTrackingPage() {
     const fromChopSignWarehouse = driverModal.fromChopSignWarehouse
     updateRow(rowId, { assignedDriverId: driverId })
     setDriverModal({ open: false, rowId: null, previousStatus: '', fromChopSignWarehouse: false })
-    const row = invoices.find((r) => r.id === rowId)
+    const row = creditNotes.find((r) => r.id === rowId)
     assignDatePendingRef.current = { rowId, fromDriver: true, fromChopSignWarehouse: !!fromChopSignWarehouse }
     setAssignDateModal({
       open: true,
@@ -913,22 +925,189 @@ export default function InvoiceTrackingPage() {
     setDriverModal({ open: false, rowId: null, previousStatus: '', fromChopSignWarehouse: false })
   }
 
-  const handleAddInvoiceRow = async () => {
-    const newRow = createInvoice({
-      invoiceNo: '',
-      dateOfInvoice: getTodayDateStr(),
-    })
-    try {
-      const inserted = await insertInvoice(newRow)
-      setInvoices((prev) => [...prev, inserted])
-    } catch (e) {
-      console.error('Add invoice row error:', e)
+  const handleAddCreditNoteApplyDateToAllChange = (checked) => {
+    setAddCreditNoteApplyDateToAll(checked)
+    if (checked) {
+      const firstDate = addCreditNoteRows[0]?.creditNoteDate || ''
+      setAddCreditNoteRows((prev) => prev.map((r) => ({ ...r, creditNoteDate: firstDate })))
     }
+  }
+  const handleAddCreditNoteMultipleToggle = (on) => {
+    setAddCreditNoteMultiple(on)
+    if (on) {
+      const newRows = Array(10).fill(null).map(() => ({ creditNoteNo: '', creditNoteDate: '' }))
+      setAddCreditNoteRows(newRows)
+      setAddCreditNoteApplyDateToAll(false)
+    } else {
+      const first = addCreditNoteRows[0] ? { ...addCreditNoteRows[0] } : { creditNoteNo: '', creditNoteDate: '' }
+      setAddCreditNoteRows([first])
+      setAddCreditNoteApplyDateToAll(false)
+    }
+  }
+
+  const setAddCreditNoteRow = (index, field, value) => {
+    setAddCreditNoteRows((prev) => {
+      const next = prev.map((r, i) => (i === index ? { ...r, [field]: value } : r))
+      if (addCreditNoteApplyDateToAll && field === 'creditNoteDate' && index === 0) {
+        return next.map((r, i) => (i === 0 ? r : { ...r, creditNoteDate: value }))
+      }
+      return next
+    })
+  }
+
+  const getAddCreditNoteEntries = () => {
+    const firstDate = addCreditNoteApplyDateToAll ? (addCreditNoteRows[0]?.creditNoteDate || '') : null
+    return addCreditNoteRows
+      .map((r, i) => ({
+        creditNoteNo: r.creditNoteNo?.trim(),
+        creditNoteDate: addCreditNoteApplyDateToAll ? firstDate : (r.creditNoteDate || ''),
+      }))
+      .filter((e) => e.creditNoteNo)
+  }
+
+  const handleAddCreditNoteProceed = () => {
+    const entries = getAddCreditNoteEntries()
+    if (entries.length === 0) return
+    if (addCreditNoteApplyDateToAll && !addCreditNoteRows[0]?.creditNoteDate) return
+    for (const e of entries) {
+      if (!addCreditNoteApplyDateToAll && !e.creditNoteDate) return
+    }
+    setAddCreditNoteConfirmOpen(true)
+  }
+
+  const handleAddCreditNoteConfirmYes = async () => {
+    const entries = getAddCreditNoteEntries()
+    const conflicts = []
+    const nonConflicting = []
+    for (const e of entries) {
+      const existing = creditNotes.find((r) => (r.creditNoteNo || '').trim() === (e.creditNoteNo || '').trim())
+      if (existing) conflicts.push({ existingRow: existing, newEntry: e })
+      else nonConflicting.push(e)
+    }
+    if (conflicts.length > 0) {
+      setAddCreditNoteConfirmOpen(false)
+      setOverwriteCreditNoteModal({ open: true, conflicts, nonConflicting, index: 0 })
+      return
+    }
+    for (const e of nonConflicting) {
+      const newRow = createCreditNote({ creditNoteNo: e.creditNoteNo, creditNoteDate: e.creditNoteDate })
+      const inserted = await insertCreditNote(newRow)
+      setCreditNotes((prev) => [...prev, inserted])
+    }
+    setAddCreditNoteFormOpen(false)
+    setAddCreditNoteConfirmOpen(false)
+    setAddCreditNoteRows([{ creditNoteNo: '', creditNoteDate: '' }])
+    setAddCreditNoteApplyDateToAll(false)
+  }
+
+  const getCreditNoteRowDisplay = (row) => {
+    const clerk = row.assignedClerkId ? employees.find((e) => e.id === row.assignedClerkId) : null
+    const salesman = row.assignedSalesmanId ? salesmen.find((s) => s.id === row.assignedSalesmanId) : null
+    const driver = row.assignedDriverId ? drivers.find((d) => d.id === row.assignedDriverId) : null
+    const transferWarehouse = row.transferWarehouseId ? warehouses.find((w) => w.id === row.transferWarehouseId) : null
+    const holdWarehouse = row.holdWarehouseId ? warehouses.find((w) => w.id === row.holdWarehouseId) : null
+    const assignedTo =
+      row.status === 'Preparing Delivery' || row.status === 'Billed'
+        ? 'Unassigned'
+        : row.status === STATUS_TRANSFER && transferWarehouse
+          ? transferWarehouse.name
+          : row.status === 'Hold - Warehouse' && holdWarehouse
+            ? holdWarehouse.name || 'Unassigned'
+            : STATUS_REQUIRES_CLERK.includes(row.status)
+              ? clerk?.name ?? 'Unassigned'
+              : STATUS_REQUIRES_SALESMAN.includes(row.status)
+                ? salesman?.name ?? 'Unassigned'
+                : row.status === 'Delivery In Progress'
+                  ? salesman?.name ?? driver?.name ?? 'Unassigned'
+                  : driver?.name ?? 'Unassigned'
+    const assignedDate =
+      row.deliveryDate && row.deliverySlot
+        ? `${formatDate(row.deliveryDate)} - ${row.deliverySlot}`
+        : row.deliveryDate
+          ? formatDate(row.deliveryDate)
+          : '–'
+    return { status: row.status, assignedTo, assignedDate }
+  }
+
+  const handleOverwriteCreditNoteYes = async () => {
+    const { conflicts, nonConflicting, index } = overwriteCreditNoteModal
+    const { existingRow, newEntry } = conflicts[index]
+    const resetPayload = {
+      creditNoteNo: newEntry.creditNoteNo,
+      creditNoteDate: newEntry.creditNoteDate,
+      status: 'Billed',
+      assignedDriverId: null,
+      assignedSalesmanId: null,
+      assignedClerkId: null,
+      deliveryDate: '',
+      deliverySlot: '',
+      transferWarehouseId: null,
+      holdWarehouseId: null,
+      holdWarehouseType: '',
+    }
+    updateRow(existingRow.id, resetPayload)
+    if (index + 1 < conflicts.length) {
+      setOverwriteCreditNoteModal((prev) => ({ ...prev, index: prev.index + 1 }))
+    } else {
+      for (const e of nonConflicting) {
+        const newRow = createCreditNote({ creditNoteNo: e.creditNoteNo, creditNoteDate: e.creditNoteDate })
+        const inserted = await insertCreditNote(newRow)
+        setCreditNotes((prev) => [...prev, inserted])
+      }
+      setOverwriteCreditNoteModal({ open: false, conflicts: [], nonConflicting: [], index: 0 })
+      setAddCreditNoteFormOpen(false)
+      setAddCreditNoteConfirmOpen(false)
+      setAddCreditNoteRows([{ creditNoteNo: '', creditNoteDate: '' }])
+      setAddCreditNoteApplyDateToAll(false)
+    }
+  }
+
+  const handleOverwriteCreditNoteNo = async () => {
+    const { conflicts, nonConflicting, index } = overwriteCreditNoteModal
+    if (index + 1 < conflicts.length) {
+      setOverwriteCreditNoteModal((prev) => ({ ...prev, index: prev.index + 1 }))
+    } else {
+      for (const e of nonConflicting) {
+        const newRow = createCreditNote({ creditNoteNo: e.creditNoteNo, creditNoteDate: e.creditNoteDate })
+        const inserted = await insertCreditNote(newRow)
+        setCreditNotes((prev) => [...prev, inserted])
+      }
+      setOverwriteCreditNoteModal({ open: false, conflicts: [], nonConflicting: [], index: 0 })
+      setAddCreditNoteFormOpen(false)
+      setAddCreditNoteConfirmOpen(false)
+      setAddCreditNoteRows([{ creditNoteNo: '', creditNoteDate: '' }])
+      setAddCreditNoteApplyDateToAll(false)
+    }
+  }
+
+  const handleAddCreditNoteConfirmNo = () => {
+    setAddCreditNoteConfirmOpen(false)
+  }
+
+  const handleAddCreditNoteFormClose = () => {
+    setAddCreditNoteFormOpen(false)
+    setAddCreditNoteConfirmOpen(false)
+    setOverwriteCreditNoteModal({ open: false, conflicts: [], nonConflicting: [], index: 0 })
+    setAddCreditNoteRows([{ creditNoteNo: '', creditNoteDate: '' }])
+    setAddCreditNoteApplyDateToAll(false)
   }
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-end gap-4">
+      <div className="flex items-center justify-between gap-4">
+        <button
+          type="button"
+          onClick={() => {
+            setAddCreditNoteFormOpen(true)
+            setAddCreditNoteConfirmOpen(false)
+            setAddCreditNoteRows(addCreditNoteMultiple ? Array(10).fill(null).map(() => ({ creditNoteNo: '', creditNoteDate: '' })) : [{ creditNoteNo: '', creditNoteDate: '' }])
+            setAddCreditNoteApplyDateToAll(false)
+          }}
+          className="inline-flex items-center gap-2 px-4 py-2 bg-blue-900 text-white rounded-lg hover:bg-blue-800 text-sm font-medium"
+        >
+          <Plus size={18} />
+          Add New Credit Note
+        </button>
         <label className="flex items-center gap-2 cursor-pointer">
           <span className="text-sm font-medium text-slate-700">Test Mode</span>
           <button
@@ -948,21 +1127,11 @@ export default function InvoiceTrackingPage() {
             />
           </button>
         </label>
-        {testMode && (
-          <button
-            type="button"
-            onClick={handleAddInvoiceRow}
-            className="inline-flex items-center gap-2 px-4 py-2 bg-blue-900 text-white rounded-lg hover:bg-blue-800 text-sm font-medium"
-          >
-            <Plus size={18} />
-            Add row
-          </button>
-        )}
       </div>
 
       <div className="bg-white rounded-lg shadow border border-slate-200 overflow-x-auto">
-        {invoicesLoading ? (
-          <div className="p-8 text-center text-slate-500">Loading invoices…</div>
+        {creditNotesLoading ? (
+          <div className="p-8 text-center text-slate-500">Loading credit notes…</div>
         ) : (
         <table className="w-full min-w-[900px] text-sm">
           <thead>
@@ -970,18 +1139,18 @@ export default function InvoiceTrackingPage() {
               <th className="text-left py-3 px-4 font-semibold text-slate-700 w-12">
                 <input
                   type="checkbox"
-                  checked={invoices.length > 0 && selectedInvoiceIds.length === invoices.length}
+                  checked={creditNotes.length > 0 && selectedInvoiceIds.length === creditNotes.length}
                   onChange={(e) => {
-                    if (e.target.checked) setSelectedInvoiceIds(invoices.map((r) => r.id))
+                    if (e.target.checked) setSelectedInvoiceIds(creditNotes.map((r) => r.id))
                     else setSelectedInvoiceIds([])
                   }}
                   onClick={(e) => e.stopPropagation()}
                   className="rounded border-slate-300 text-blue-900 focus:ring-blue-900"
-                  aria-label="Select all invoices"
+                  aria-label="Select all credit notes"
                 />
               </th>
-              <th className="text-left py-3 px-4 font-semibold text-slate-700">Invoice No</th>
-              <th className="text-left py-3 px-4 font-semibold text-slate-700">Date of Invoice</th>
+              <th className="text-left py-3 px-4 font-semibold text-slate-700">Credit Note No</th>
+              <th className="text-left py-3 px-4 font-semibold text-slate-700">Credit Note Date</th>
               <th className="text-left py-3 px-4 font-semibold text-slate-700">Status</th>
               <th className="text-left py-3 px-4 font-semibold text-slate-700">Assigned To</th>
               <th className="text-left py-3 px-4 font-semibold text-slate-700">Assigned Date</th>
@@ -991,7 +1160,7 @@ export default function InvoiceTrackingPage() {
             </tr>
           </thead>
           <tbody>
-            {invoices.map((row) => {
+            {creditNotes.map((row) => {
               const salesman = row.assignedSalesmanId
                 ? salesmen.find((s) => s.id === row.assignedSalesmanId)
                 : null
@@ -1099,53 +1268,18 @@ export default function InvoiceTrackingPage() {
                       }}
                       onClick={(e) => e.stopPropagation()}
                       className="rounded border-slate-300 text-blue-900 focus:ring-blue-900"
-                      aria-label={`Select invoice ${row.invoiceNo || row.id}`}
+                      aria-label={`Select credit note ${row.creditNoteNo || row.id}`}
                     />
                   </td>
                   <td className="py-2 px-4">
-                    <input
-                      type="text"
-                      value={row.invoiceNo}
-                      onChange={(e) => updateRow(row.id, { invoiceNo: e.target.value })}
-                      readOnly={!canEditRow}
-                      className={`w-full max-w-[120px] py-1.5 px-2 border rounded ${
-                        canEditRow
-                          ? 'border-slate-300 focus:ring-2 focus:ring-blue-900'
-                          : 'border-transparent bg-transparent read-only:bg-transparent'
-                      }`}
-                    />
+                    <span className="py-1.5 px-2 block text-slate-700">
+                      {row.creditNoteNo || '–'}
+                    </span>
                   </td>
                   <td className="py-2 px-4">
-                    {canEditRow ? (
-                      invoiceDatePickerRow === row.id ? (
-                        <input
-                          type="date"
-                          defaultValue={toInputDate(row.dateOfInvoice)}
-                          onBlur={(e) => {
-                            const v = e.target.value
-                            if (v) handleInvoiceDateChange(row.id, v)
-                            setInvoiceDatePickerRow(null)
-                          }}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Escape') setInvoiceDatePickerRow(null)
-                          }}
-                          autoFocus
-                          className="py-1.5 px-2 border border-slate-300 rounded focus:ring-2 focus:ring-blue-900 max-w-[140px]"
-                        />
-                      ) : (
-                        <button
-                          type="button"
-                          onClick={() => setInvoiceDatePickerRow(row.id)}
-                          className="text-left py-1.5 px-2 rounded hover:bg-slate-100 min-w-[100px]"
-                        >
-                          {row.dateOfInvoice ? formatDate(row.dateOfInvoice) : 'Select date'}
-                        </button>
-                      )
-                    ) : (
-                      <span className="py-1.5 px-2 block text-slate-700">
-                        {row.dateOfInvoice ? formatDate(row.dateOfInvoice) : '–'}
-                      </span>
-                    )}
+                    <span className="py-1.5 px-2 block text-slate-700">
+                      {row.creditNoteDate ? formatDate(row.creditNoteDate) : '–'}
+                    </span>
                   </td>
                   <td className="py-2 px-4">
                     {isCompletedLocked ? (
@@ -1291,6 +1425,166 @@ export default function InvoiceTrackingPage() {
         </table>
         )}
       </div>
+
+      {/* Add New Credit Note - Form */}
+      {addCreditNoteFormOpen && !addCreditNoteConfirmOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50" onClick={handleAddCreditNoteFormClose}>
+          <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-auto p-6" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-lg font-semibold text-slate-800 mb-4">Add New Credit Note</h3>
+            <label className="flex items-center gap-2 mb-4 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={addCreditNoteMultiple}
+                onChange={(e) => handleAddCreditNoteMultipleToggle(e.target.checked)}
+                className="rounded border-slate-300 text-blue-900 focus:ring-blue-900"
+              />
+              <span className="text-sm text-slate-700">Add In Multiple</span>
+            </label>
+            {!addCreditNoteMultiple ? (
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Credit Note No</label>
+                  <input
+                    type="text"
+                    value={addCreditNoteRows[0]?.creditNoteNo || ''}
+                    onChange={(e) => setAddCreditNoteRow(0, 'creditNoteNo', e.target.value)}
+                    className="w-full py-2 px-3 border border-slate-300 rounded focus:ring-2 focus:ring-blue-900"
+                    placeholder="e.g. CN-001"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Credit Note Date</label>
+                  <input
+                    type="date"
+                    value={addCreditNoteRows[0]?.creditNoteDate || ''}
+                    onChange={(e) => setAddCreditNoteRow(0, 'creditNoteDate', e.target.value)}
+                    className="w-full py-2 px-3 border border-slate-300 rounded focus:ring-2 focus:ring-blue-900"
+                  />
+                </div>
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm border border-slate-200">
+                  <thead>
+                    <tr className="bg-slate-100">
+                      <th className="text-left py-2 px-3 font-semibold text-slate-700">Credit Note No</th>
+                      <th className="text-left py-2 px-3 font-semibold text-slate-700">Credit Note Date</th>
+                      <th className="text-left py-2 px-3 font-semibold text-slate-700 w-28">
+                        <label className="flex items-center gap-1 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={addCreditNoteApplyDateToAll}
+                            onChange={(e) => handleAddCreditNoteApplyDateToAllChange(e.target.checked)}
+                            className="rounded border-slate-300 text-blue-900 focus:ring-blue-900"
+                          />
+                          Apply To All
+                        </label>
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {addCreditNoteRows.map((row, i) => (
+                      <tr key={i} className="border-t border-slate-200">
+                        <td className="py-2 px-3">
+                          <input
+                            type="text"
+                            value={row.creditNoteNo}
+                            onChange={(e) => setAddCreditNoteRow(i, 'creditNoteNo', e.target.value)}
+                            className="w-full py-1.5 px-2 border border-slate-300 rounded text-sm"
+                            placeholder={`No. ${i + 1}`}
+                          />
+                        </td>
+                        <td className="py-2 px-3">
+                          <input
+                            type="date"
+                            value={addCreditNoteApplyDateToAll ? (addCreditNoteRows[0]?.creditNoteDate || '') : row.creditNoteDate}
+                            onChange={(e) => setAddCreditNoteRow(i, 'creditNoteDate', e.target.value)}
+                            disabled={addCreditNoteApplyDateToAll && i > 0}
+                            className={`w-full py-1.5 px-2 border rounded text-sm ${addCreditNoteApplyDateToAll && i > 0 ? 'bg-slate-100 border-slate-200' : 'border-slate-300'}`}
+                          />
+                        </td>
+                        <td className="py-2 px-3" />
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            <div className="flex justify-end gap-2 mt-6">
+              <button type="button" onClick={handleAddCreditNoteFormClose} className="px-4 py-2 border border-slate-300 rounded-lg hover:bg-slate-50">Cancel</button>
+              <button type="button" onClick={handleAddCreditNoteProceed} className="px-4 py-2 bg-blue-900 text-white rounded-lg hover:bg-blue-800">Done</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Add New Credit Note - Confirm */}
+      {addCreditNoteFormOpen && addCreditNoteConfirmOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50" onClick={handleAddCreditNoteConfirmNo}>
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full max-h-[90vh] overflow-auto p-6" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-lg font-semibold text-slate-800 mb-2">Confirm new credit notes</h3>
+            <p className="text-slate-600 text-sm mb-4">Please confirm the following. Is all correct?</p>
+            <ul className="border border-slate-200 rounded-lg divide-y divide-slate-200 mb-6 max-h-60 overflow-y-auto">
+              {getAddCreditNoteEntries().map((e, i) => (
+                <li key={i} className="py-2 px-3 flex justify-between text-sm">
+                  <span className="font-medium text-slate-800">{e.creditNoteNo}</span>
+                  <span className="text-slate-600">{e.creditNoteDate ? formatDate(e.creditNoteDate) : '–'}</span>
+                </li>
+              ))}
+            </ul>
+            <div className="flex justify-end gap-2">
+              <button type="button" onClick={handleAddCreditNoteConfirmNo} className="px-4 py-2 border border-slate-300 rounded-lg hover:bg-slate-50">No</button>
+              <button type="button" onClick={handleAddCreditNoteConfirmYes} className="px-4 py-2 bg-blue-900 text-white rounded-lg hover:bg-blue-800">Yes</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Overwrite existing Credit Note */}
+      {overwriteCreditNoteModal.open && overwriteCreditNoteModal.conflicts[overwriteCreditNoteModal.index] && (() => {
+        const { existingRow, newEntry } = overwriteCreditNoteModal.conflicts[overwriteCreditNoteModal.index]
+        const existingDisplay = getCreditNoteRowDisplay(existingRow)
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50" onClick={() => handleOverwriteCreditNoteNo()}>
+            <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-auto p-6" onClick={(e) => e.stopPropagation()}>
+              <h3 className="text-lg font-semibold text-slate-800 mb-2">Credit note already exists</h3>
+              <p className="text-slate-600 text-sm mb-4">
+                <strong>{newEntry.creditNoteNo}</strong> already exists. Do you want to overwrite it? Once overwrite, you may lose the progress of the existing credit note.
+              </p>
+              <div className="grid grid-cols-2 gap-4 mb-6">
+                <div className="border border-slate-200 rounded-lg p-3 bg-slate-50">
+                  <p className="text-xs font-semibold text-slate-500 uppercase mb-2">Existing</p>
+                  <table className="text-sm w-full">
+                    <tbody>
+                      <tr><td className="text-slate-500 py-1 pr-2">Credit Note No</td><td className="font-medium">{existingRow.creditNoteNo || '–'}</td></tr>
+                      <tr><td className="text-slate-500 py-1 pr-2">Credit Note Date</td><td>{existingRow.creditNoteDate ? formatDate(existingRow.creditNoteDate) : '–'}</td></tr>
+                      <tr><td className="text-slate-500 py-1 pr-2">Status</td><td>{existingDisplay.status}</td></tr>
+                      <tr><td className="text-slate-500 py-1 pr-2">Assigned To</td><td>{existingDisplay.assignedTo}</td></tr>
+                      <tr><td className="text-slate-500 py-1 pr-2">Assigned Date</td><td>{existingDisplay.assignedDate}</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div className="border border-slate-200 rounded-lg p-3 bg-blue-50/50">
+                  <p className="text-xs font-semibold text-slate-500 uppercase mb-2">New</p>
+                  <table className="text-sm w-full">
+                    <tbody>
+                      <tr><td className="text-slate-500 py-1 pr-2">Credit Note No</td><td className="font-medium">{newEntry.creditNoteNo || '–'}</td></tr>
+                      <tr><td className="text-slate-500 py-1 pr-2">Credit Note Date</td><td>{newEntry.creditNoteDate ? formatDate(newEntry.creditNoteDate) : '–'}</td></tr>
+                      <tr><td className="text-slate-500 py-1 pr-2">Status</td><td>Billed</td></tr>
+                      <tr><td className="text-slate-500 py-1 pr-2">Assigned To</td><td>–</td></tr>
+                      <tr><td className="text-slate-500 py-1 pr-2">Assigned Date</td><td>–</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+              <div className="flex justify-end gap-2">
+                <button type="button" onClick={handleOverwriteCreditNoteNo} className="px-4 py-2 border border-slate-300 rounded-lg hover:bg-slate-50">No</button>
+                <button type="button" onClick={handleOverwriteCreditNoteYes} className="px-4 py-2 bg-blue-900 text-white rounded-lg hover:bg-blue-800">Yes</button>
+              </div>
+            </div>
+          </div>
+        )
+      })()}
 
       <DeliverySlotModal
         isOpen={deliveryModal.open}
@@ -1655,15 +1949,15 @@ export default function InvoiceTrackingPage() {
             className="bg-white rounded-lg shadow-xl max-w-md w-full p-6"
             onClick={(e) => e.stopPropagation()}
           >
-            <h3 className="text-lg font-semibold text-slate-800 mb-3">Apply to selected invoices?</h3>
+            <h3 className="text-lg font-semibold text-slate-800 mb-3">Apply to selected credit notes?</h3>
             <p className="text-slate-600 text-sm mb-2">
               Are you sure you want to apply this to the following?
             </p>
             <ul className="text-slate-700 text-sm mb-4 max-h-40 overflow-y-auto list-disc list-inside">
               {bulkApplyConfirmModal.rowIds.map((id) => {
-                const inv = invoices.find((r) => r.id === id)
+                const inv = creditNotes.find((r) => r.id === id)
                 return (
-                  <li key={id}>{inv?.invoiceNo || id}</li>
+                  <li key={id}>{inv?.creditNoteNo || id}</li>
                 )
               })}
             </ul>

@@ -1,9 +1,35 @@
+/**
+ * Local-only storage for employees. All data saved in localStorage on this machine.
+ */
 import { createContext, useContext, useState, useCallback, useEffect } from 'react'
-import { supabase } from '../supabaseClient'
 
 const EMPLOYEE_POSITIONS = ['Salesman', 'Lorry Driver', 'Clerk']
+const STORAGE_KEY = 'etracking_employees'
 
 const EmployeesContext = createContext(null)
+
+function generateId() {
+  return 'local_' + Date.now() + '_' + Math.random().toString(36).slice(2, 11)
+}
+
+function loadEmployees() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    if (!raw) return []
+    const data = JSON.parse(raw)
+    return Array.isArray(data) ? data : []
+  } catch {
+    return []
+  }
+}
+
+function saveEmployees(employees) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(employees))
+  } catch (e) {
+    console.error('Failed to save employees to localStorage:', e)
+  }
+}
 
 function mapEmployee(row) {
   if (!row) return null
@@ -20,18 +46,15 @@ export function EmployeesProvider({ children }) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
 
-  const fetchEmployees = useCallback(async () => {
+  const fetchEmployees = useCallback(() => {
     setLoading(true)
     setError(null)
-    const { data, error: e } = await supabase
-      .from('employees')
-      .select('*')
-      .order('created_at', { ascending: false })
-    if (e) {
+    try {
+      const data = loadEmployees()
+      setEmployees(data.map(mapEmployee))
+    } catch (e) {
       setError(e.message)
       setEmployees([])
-    } else {
-      setEmployees((data || []).map(mapEmployee))
     }
     setLoading(false)
   }, [])
@@ -40,18 +63,17 @@ export function EmployeesProvider({ children }) {
     fetchEmployees()
   }, [fetchEmployees])
 
-  const addEmployee = useCallback(async (position, name) => {
-    const { data, error: e } = await supabase
-      .from('employees')
-      .insert({ name, position })
-      .select('id, position, name')
-      .single()
-    if (e) {
-      console.error('Add employee error:', e)
-      throw e
+  const addEmployee = useCallback((position, name) => {
+    const list = loadEmployees()
+    const newEmployee = {
+      id: generateId(),
+      position,
+      name: name || '',
+      number: '',
     }
-    const newEmployee = mapEmployee(data)
-    setEmployees((prev) => [newEmployee, ...prev])
+    list.unshift(newEmployee)
+    saveEmployees(list)
+    setEmployees((prev) => [mapEmployee(newEmployee), ...prev])
     return newEmployee.id
   }, [])
 

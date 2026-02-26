@@ -4,8 +4,8 @@ import react from '@vitejs/plugin-react'
 export default defineConfig({
   plugins: [react()],
   server: {
-    host: '127.0.0.1', // Forces IPv4
+    host: '127.0.0.1',
     port: 5173,
-    strictPort: true,
+    strictPort: true, // Keep port fixed so localStorage (same origin) persists across restarts
   }
 })

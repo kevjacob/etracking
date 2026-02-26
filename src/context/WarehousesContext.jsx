@@ -1,15 +1,42 @@
+/**
+ * Local-only storage for warehouses. All data saved in localStorage on this machine.
+ */
 import { createContext, useContext, useState, useCallback, useEffect } from 'react'
-import { supabase } from '../supabaseClient'
 
 const WarehousesContext = createContext(null)
+
+const STORAGE_KEY = 'etracking_warehouses'
+
+function generateId() {
+  return 'local_' + Date.now() + '_' + Math.random().toString(36).slice(2, 11)
+}
+
+function loadWarehouses() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    if (!raw) return []
+    const data = JSON.parse(raw)
+    return Array.isArray(data) ? data : []
+  } catch {
+    return []
+  }
+}
+
+function saveWarehouses(warehouses) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(warehouses))
+  } catch (e) {
+    console.error('Failed to save warehouses to localStorage:', e)
+  }
+}
 
 function mapWarehouse(row) {
   if (!row) return null
   return {
     id: row.id,
-    name: row.warehouse_name || row.name || '',
-    picName: row.pic_name || '',
-    picPhone: row.pic_phone || '',
+    name: row.name || row.warehouse_name || '',
+    picName: row.picName ?? row.pic_name ?? '',
+    picPhone: row.picPhone ?? row.pic_phone ?? '',
   }
 }
 
@@ -18,18 +45,15 @@ export function WarehousesProvider({ children }) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
 
-  const fetchWarehouses = useCallback(async () => {
+  const fetchWarehouses = useCallback(() => {
     setLoading(true)
     setError(null)
-    const { data, error: e } = await supabase
-      .from('warehouses')
-      .select('*')
-      .order('created_at', { ascending: false })
-    if (e) {
+    try {
+      const data = loadWarehouses()
+      setWarehouses(data.map(mapWarehouse))
+    } catch (e) {
       setError(e.message)
       setWarehouses([])
-    } else {
-      setWarehouses((data || []).map(mapWarehouse))
     }
     setLoading(false)
   }, [])
@@ -38,22 +62,17 @@ export function WarehousesProvider({ children }) {
     fetchWarehouses()
   }, [fetchWarehouses])
 
-  const addWarehouse = useCallback(async (warehouseName, picName) => {
-    const payload = {
-      warehouse_name: warehouseName ?? '',
-      pic_name: picName ?? '',
+  const addWarehouse = useCallback((warehouseName, picName) => {
+    const list = loadWarehouses()
+    const newWarehouse = {
+      id: generateId(),
+      name: warehouseName ?? '',
+      picName: picName ?? '',
+      picPhone: '',
     }
-    const { data, error: e } = await supabase
-      .from('warehouses')
-      .insert(payload)
-      .select('id, warehouse_name, pic_name')
-      .single()
-    if (e) {
-      console.error('Add warehouse error:', e)
-      throw e
-    }
-    const newWarehouse = mapWarehouse(data)
-    setWarehouses((prev) => [newWarehouse, ...prev])
+    list.unshift(newWarehouse)
+    saveWarehouses(list)
+    setWarehouses((prev) => [mapWarehouse(newWarehouse), ...prev])
     return newWarehouse.id
   }, [])
 
