@@ -1,19 +1,40 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { X } from 'lucide-react'
 import { useEmployees } from '../context/EmployeesContext'
 
-export default function AddEmployeeModal({ isOpen, onClose, onSaved }) {
-  const { addEmployee, positions } = useEmployees()
+export default function AddEmployeeModal({ isOpen, onClose, onSaved, employee }) {
+  const { addEmployee, updateEmployee, positions } = useEmployees()
   const [position, setPosition] = useState(positions[0])
   const [name, setName] = useState('')
+  const [number, setNumber] = useState('')
+  const isEdit = !!employee
+
+  useEffect(() => {
+    if (isOpen) {
+      if (employee) {
+        setPosition(employee.position || positions[0])
+        setName(employee.name || '')
+        setNumber(employee.number || '')
+      } else {
+        setPosition(positions[0])
+        setName('')
+        setNumber('')
+      }
+    }
+  }, [isOpen, employee, positions])
 
   const handleSubmit = async (e) => {
     e.preventDefault()
     if (!name.trim()) return
     try {
-      await addEmployee(position, name.trim())
+      if (isEdit) {
+        await updateEmployee(employee.id, { position, name: name.trim(), number: number.trim() })
+      } else {
+        await addEmployee(position, name.trim())
+      }
       setName('')
       setPosition(positions[0])
+      setNumber('')
       onSaved?.()
       onClose()
     } catch (err) {
@@ -24,6 +45,7 @@ export default function AddEmployeeModal({ isOpen, onClose, onSaved }) {
   const handleClose = () => {
     setName('')
     setPosition(positions[0])
+    setNumber('')
     onClose()
   }
 
@@ -36,7 +58,7 @@ export default function AddEmployeeModal({ isOpen, onClose, onSaved }) {
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between mb-4">
-          <h3 className="text-lg font-semibold text-slate-800">Add New Employee</h3>
+          <h3 className="text-lg font-semibold text-slate-800">{isEdit ? 'Edit Employee' : 'Add New Employee'}</h3>
           <button type="button" onClick={handleClose} className="p-1 rounded hover:bg-slate-100 text-slate-500" aria-label="Close">
             <X size={20} />
           </button>
@@ -62,6 +84,16 @@ export default function AddEmployeeModal({ isOpen, onClose, onSaved }) {
               onChange={(e) => setName(e.target.value)}
               className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-900 focus:border-blue-900"
               placeholder="Enter name"
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-1">Number</label>
+            <input
+              type="text"
+              value={number}
+              onChange={(e) => setNumber(e.target.value)}
+              className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-900 focus:border-blue-900"
+              placeholder="Phone or extension"
             />
           </div>
           <div className="flex justify-end gap-2 pt-2">

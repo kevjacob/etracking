@@ -1,3 +1,22 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+@keyframes row-highlight {
+  0% { background-color: transparent; }
+  50% { background-color: rgb(254 243 199); }
+  100% { background-color: transparent; }
+}
+
+.highlight-row {
+  animation: row-highlight 1s ease-in-out;
+}
+
+@keyframes chat-unread-pulse {
+  0%, 100% { opacity: 1; background-color: rgb(234 88 12); }
+  50% { opacity: 0.85; background-color: rgb(249 115 22); }
+}
+
+.chat-btn-unread {
+  animation: chat-unread-pulse 1.5s ease-in-out infinite;
+}

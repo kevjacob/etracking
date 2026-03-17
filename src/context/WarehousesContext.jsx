@@ -1,7 +1,9 @@
 /**
- * Local-only storage for warehouses. All data saved in localStorage on this machine.
+ * Warehouses. Uses Supabase when configured, else localStorage.
  */
 import { createContext, useContext, useState, useCallback, useEffect } from 'react'
+import { supabase, isSupabaseConfigured } from '../supabaseClient'
+import { toSnakeCase, fromSnakeCase } from '../lib/dbMappers'
 
 const WarehousesContext = createContext(null)
 
@@ -32,11 +34,12 @@ function saveWarehouses(warehouses) {
 
 function mapWarehouse(row) {
   if (!row) return null
+  const r = fromSnakeCase(row)
   return {
-    id: row.id,
-    name: row.name || row.warehouse_name || '',
-    picName: row.picName ?? row.pic_name ?? '',
-    picPhone: row.picPhone ?? row.pic_phone ?? '',
+    id: r.id,
+    name: r.name || r.warehouse_name || '',
+    picName: r.picName ?? r.pic_name ?? '',
+    picPhone: r.picPhone ?? r.pic_phone ?? '',
   }
 }
 
@@ -45,12 +48,18 @@ export function WarehousesProvider({ children }) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
 
-  const fetchWarehouses = useCallback(() => {
+  const fetchWarehouses = useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
-      const data = loadWarehouses()
-      setWarehouses(data.map(mapWarehouse))
+      if (isSupabaseConfigured()) {
+        const { data, error } = await supabase.from('warehouses').select('*').order('name', { ascending: true })
+        if (error) throw error
+        setWarehouses((data || []).map(mapWarehouse))
+      } else {
+        const data = loadWarehouses()
+        setWarehouses(data.map(mapWarehouse))
+      }
     } catch (e) {
       setError(e.message)
       setWarehouses([])
@@ -62,7 +71,19 @@ export function WarehousesProvider({ children }) {
     fetchWarehouses()
   }, [fetchWarehouses])
 
-  const addWarehouse = useCallback((warehouseName, picName) => {
+  const addWarehouse = useCallback(async (warehouseName, picName) => {
+    if (isSupabaseConfigured()) {
+      const payload = toSnakeCase({
+        name: warehouseName ?? '',
+        picName: picName ?? '',
+        picPhone: '',
+      })
+      const { data, error } = await supabase.from('warehouses').insert(payload).select('*').single()
+      if (error) throw error
+      const mapped = mapWarehouse(data)
+      setWarehouses((prev) => [mapped, ...prev])
+      return mapped.id
+    }
     const list = loadWarehouses()
     const newWarehouse = {
       id: generateId(),
@@ -76,7 +97,30 @@ export function WarehousesProvider({ children }) {
     return newWarehouse.id
   }, [])
 
-  const value = { warehouses, addWarehouse, loading, error, refetch: fetchWarehouses }
+  const updateWarehouse = useCallback(async (id, { name, picName, picPhone }) => {
+    if (isSupabaseConfigured()) {
+      const payload = toSnakeCase({
+        name: name ?? '',
+        picName: picName ?? '',
+        picPhone: picPhone ?? '',
+      })
+      const { data, error } = await supabase.from('warehouses').update(payload).eq('id', id).select('*').single()
+      if (error) throw error
+      const mapped = mapWarehouse(data)
+      setWarehouses((prev) => prev.map((w) => (w.id === id ? mapped : w)))
+      return mapped.id
+    }
+    const list = loadWarehouses()
+    const index = list.findIndex((w) => w.id === id)
+    if (index === -1) return id
+    const updated = { ...list[index], name: name ?? '', picName: picName ?? '', picPhone: picPhone ?? '' }
+    list[index] = updated
+    saveWarehouses(list)
+    setWarehouses((prev) => prev.map((w) => (w.id === id ? mapWarehouse(updated) : w)))
+    return id
+  }, [])
+
+  const value = { warehouses, addWarehouse, updateWarehouse, loading, error, refetch: fetchWarehouses }
   return (
     <WarehousesContext.Provider value={value}>
       {children}

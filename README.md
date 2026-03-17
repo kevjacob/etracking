@@ -11,6 +11,10 @@ npm run dev
 
 Open [http://localhost:5173](http://localhost:5173) in your browser.
 
+### Optional: Supabase (Docker) database
+
+To use Supabase instead of localStorage, see **[SUPABASE.md](./SUPABASE.md)**. In short: run `npx supabase start`, put the API URL and anon key in a `.env` file, then start the app.
+
 ## Structure
 
 - **Header**: Blue-900 background, white title "Tai Say Company eTracking"

@@ -1,9 +1,12 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { createPortal, flushSync } from 'react-dom'
-import { Trash2, Plus } from 'lucide-react'
+import { Trash2, Plus, AlertTriangle, Pencil } from 'lucide-react'
+import { useAuth } from '../context/AuthContext'
+import { useTestMode } from '../context/TestModeContext'
 import { useEmployees } from '../context/EmployeesContext'
 import { useWarehouses } from '../context/WarehousesContext'
 import { formatDate, toInputDate, parseDate } from '../utils/dateFormat'
+import { sortBySerial } from '../utils/serialSort'
 import { fetchDeliveryOrders, insertDeliveryOrder, updateDeliveryOrder, deleteDeliveryOrder } from '../api/deliveryOrders'
 import { fetchInvoices, updateInvoice } from '../api/invoices'
 import DeliverySlotModal from '../components/DeliverySlotModal'
@@ -14,6 +17,7 @@ import SelectWarehouseModal from '../components/SelectWarehouseModal'
 import HoldWarehouseTypeModal from '../components/HoldWarehouseTypeModal'
 import SelectDriverModal from '../components/SelectDriverModal'
 import NoticeModal from '../components/NoticeModal'
+import { useRealtimeTable } from '../hooks/useRealtimeTable'
 
 function getTodayDateStr() {
   const d = new Date()
@@ -42,6 +46,7 @@ const STATUS_OPTIONS = [
   'Chop & Sign - Salesman',
   'Transfer',
   'Completed',
+  'Cancelled',
 ]
 
 const STATUS_REQUIRES_SALESMAN = ['Hold - Salesman', 'Chop & Sign - Salesman']
@@ -62,7 +67,7 @@ const PHASE_2 = [
 ]
 const PHASE_3 = ['Delivery In Progress']
 const PHASE_4 = ['Delivered']
-const PHASE_5 = ['Completed']
+const PHASE_5 = ['Completed', 'Cancelled']
 
 function getPhase(status) {
   if (PHASE_1.includes(status)) return 1
@@ -71,6 +76,27 @@ function getPhase(status) {
   if (PHASE_4.includes(status)) return 4
   if (PHASE_5.includes(status)) return 5
   return 1
+}
+
+function getStatusMaxDays(status) {
+  if (status === 'Cancelled') return 999
+  if (PHASE_1.includes(status)) return 1
+  if (status === 'Preparing Delivery') return 3
+  if (PHASE_2.includes(status)) return 4
+  if (PHASE_3.includes(status)) return 1.5
+  if (PHASE_4.includes(status)) return 1
+  if (PHASE_5.includes(status)) return 1
+  return 1
+}
+
+function isStatusOverdue(row) {
+  const updatedAt = row?.statusUpdatedAt
+  if (!updatedAt) return false
+  const updated = new Date(updatedAt).getTime()
+  const now = Date.now()
+  const maxDays = getStatusMaxDays(row.status)
+  const maxMs = maxDays * 24 * 60 * 60 * 1000
+  return now - updated > maxMs
 }
 
 const DELIVERED_VALIDATION_MSG = 'Assigned person and date is missing, please go to preparing delivery.'
@@ -86,6 +112,7 @@ function createDeliveryOrder(overrides = {}) {
     deliveryOrderDate: '',
     numberAndDateLocked: false,
     status: 'Billed',
+    statusUpdatedAt: new Date().toISOString(),
     assignedDriverId: null,
     assignedSalesmanId: null,
     assignedClerkId: null,
@@ -102,11 +129,13 @@ function createDeliveryOrder(overrides = {}) {
 }
 
 export default function DeliveryOrderTrackingPage() {
+  const { isSuperuser } = useAuth()
+  const { testMode } = useTestMode()
   const { employees } = useEmployees()
   const { warehouses } = useWarehouses()
   const drivers = employees.filter((e) => e.position === 'Lorry Driver')
   const salesmen = employees.filter((e) => e.position === 'Salesman')
-  const [testMode, setTestMode] = useState(false)
+  const canUseTestMode = testMode && isSuperuser
   const [deliveryOrders, setDeliveryOrders] = useState([])
   const [deliveryOrdersLoading, setDeliveryOrdersLoading] = useState(true)
   const [addDeliveryOrderFormOpen, setAddDeliveryOrderFormOpen] = useState(false)
@@ -169,6 +198,7 @@ export default function DeliveryOrderTrackingPage() {
     rowId: null,
   })
   const [completedConfirmModal, setCompletedConfirmModal] = useState({ open: false, rowId: null })
+  const [cancelledConfirmModal, setCancelledConfirmModal] = useState({ open: false, rowId: null })
   const [chopSignWarehouseConfirmModal, setChopSignWarehouseConfirmModal] = useState({
     open: false,
     rowId: null,
@@ -176,6 +206,7 @@ export default function DeliveryOrderTrackingPage() {
   })
   const [phase4LockedNoticeOpen, setPhase4LockedNoticeOpen] = useState(false)
   const [backtrackPhase2To1Modal, setBacktrackPhase2To1Modal] = useState({ open: false, rowId: null })
+  const [backtrackPhase3To1Modal, setBacktrackPhase3To1Modal] = useState({ open: false, rowId: null })
   const [phase3ToOtherPhase2Modal, setPhase3ToOtherPhase2Modal] = useState({
     open: false,
     rowId: null,
@@ -196,6 +227,7 @@ export default function DeliveryOrderTrackingPage() {
     onApplied: null,
   })
   const [attachmentModal, setAttachmentModal] = useState({ open: false, rowId: null })
+  const [attachmentRowQueue, setAttachmentRowQueue] = useState([])
   const [attachmentType, setAttachmentType] = useState('none') // 'original' | 'copy' | 'none'
   const [invoiceSearchModal, setInvoiceSearchModal] = useState({
     open: false,
@@ -207,6 +239,16 @@ export default function DeliveryOrderTrackingPage() {
   const [invoiceSearchSelectedId, setInvoiceSearchSelectedId] = useState(null)
   const [invoiceAttachedNotice, setInvoiceAttachedNotice] = useState({ open: false, message: '' })
   const [invoiceSearchList, setInvoiceSearchList] = useState([])
+  const [deliveryOrderSearchQuery, setDeliveryOrderSearchQuery] = useState('')
+  const filteredDeliveryOrders = useMemo(() => {
+    const q = (deliveryOrderSearchQuery || '').trim().toLowerCase()
+    const list = !q
+      ? deliveryOrders
+      : deliveryOrders.filter((row) =>
+          (row.deliveryOrderNo || '').toLowerCase().includes(q)
+        )
+    return sortBySerial(list, (row) => row.deliveryOrderNo)
+  }, [deliveryOrders, deliveryOrderSearchQuery])
   const assignDatePendingRef = useRef({
     rowId: null,
     fromDriver: false,
@@ -219,48 +261,10 @@ export default function DeliveryOrderTrackingPage() {
     setDeliveryOrdersLoading(true)
     try {
       const data = await fetchDeliveryOrders()
-      if (data.length === 0) {
-        const samples = [
-          createDeliveryOrder({ deliveryOrderNo: 'DO-001', deliveryOrderDate: '2025-02-20' }),
-          createDeliveryOrder({ deliveryOrderNo: 'DO-002', deliveryOrderDate: '2025-02-21' }),
-          createDeliveryOrder({ deliveryOrderNo: 'DO-003', deliveryOrderDate: '2025-02-22' }),
-          createDeliveryOrder({ deliveryOrderNo: 'DO-004', deliveryOrderDate: '2025-02-23' }),
-          createDeliveryOrder({ deliveryOrderNo: 'DO-005', deliveryOrderDate: '2025-02-24' }),
-        ]
-        const inserted = []
-        for (const row of samples) {
-          const saved = await insertDeliveryOrder(row)
-          inserted.push(saved)
-        }
-        setDeliveryOrders(inserted)
-      } else {
-        setDeliveryOrders(data)
-      }
+      setDeliveryOrders(Array.isArray(data) ? data : [])
     } catch (e) {
       console.error('Fetch delivery orders error:', e)
-      try {
-        const samples = [
-          createDeliveryOrder({ deliveryOrderNo: 'DO-001', deliveryOrderDate: '2025-02-20' }),
-          createDeliveryOrder({ deliveryOrderNo: 'DO-002', deliveryOrderDate: '2025-02-21' }),
-          createDeliveryOrder({ deliveryOrderNo: 'DO-003', deliveryOrderDate: '2025-02-22' }),
-          createDeliveryOrder({ deliveryOrderNo: 'DO-004', deliveryOrderDate: '2025-02-23' }),
-          createDeliveryOrder({ deliveryOrderNo: 'DO-005', deliveryOrderDate: '2025-02-24' }),
-        ]
-        const inserted = []
-        for (const row of samples) {
-          const saved = await insertDeliveryOrder(row)
-          inserted.push(saved)
-        }
-        setDeliveryOrders(inserted)
-      } catch (e2) {
-        setDeliveryOrders([
-          createDeliveryOrder({ deliveryOrderNo: 'DO-001', deliveryOrderDate: '2025-02-20' }),
-          createDeliveryOrder({ deliveryOrderNo: 'DO-002', deliveryOrderDate: '2025-02-21' }),
-          createDeliveryOrder({ deliveryOrderNo: 'DO-003', deliveryOrderDate: '2025-02-22' }),
-          createDeliveryOrder({ deliveryOrderNo: 'DO-004', deliveryOrderDate: '2025-02-23' }),
-          createDeliveryOrder({ deliveryOrderNo: 'DO-005', deliveryOrderDate: '2025-02-24' }),
-        ])
-      }
+      setDeliveryOrders([])
     }
     setDeliveryOrdersLoading(false)
   }, [])
@@ -269,27 +273,42 @@ export default function DeliveryOrderTrackingPage() {
     loadDeliveryOrders()
   }, [loadDeliveryOrders])
 
+  useRealtimeTable('delivery_orders', setDeliveryOrders)
+
+  const [highlightRowId, setHighlightRowId] = useState(null)
+  useEffect(() => {
+    const hash = window.location.hash
+    if (!hash || !hash.startsWith('#row-')) return
+    const rowId = hash.slice(5)
+    const el = document.getElementById(hash.slice(1))
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+      setHighlightRowId(rowId)
+      const t = setTimeout(() => setHighlightRowId(null), 1000)
+      return () => clearTimeout(t)
+    }
+  }, [deliveryOrders])
+
   const updateRow = (id, updates) => {
+    const withTimestamp =
+      updates.status !== undefined
+        ? { ...updates, statusUpdatedAt: new Date().toISOString() }
+        : updates
     setDeliveryOrders((prev) => {
-      const next = prev.map((row) => (row.id === id ? { ...row, ...updates } : row))
+      const next = prev.map((row) => (row.id === id ? { ...row, ...withTimestamp } : row))
       const row = next.find((r) => r.id === id)
       if (!row) return next
-      // Local storage: always persist (no testMode gate)
-      if (isLocalId(id)) {
-        updateDeliveryOrder(id, row).catch((e) => console.error('Update delivery order error:', e))
-      } else {
-        insertDeliveryOrder(row)
-          .then((inserted) => {
-            setDeliveryOrders((p) => p.map((r) => (r.id === id ? inserted : r)))
-          })
-          .catch((e) => console.error('Insert delivery order error:', e))
-      }
+      updateDeliveryOrder(id, row)
+        .then((updated) => {
+          if (updated) setDeliveryOrders((p) => p.map((r) => (r.id === id ? updated : r)))
+        })
+        .catch((e) => console.error('Update delivery order error:', e))
       return next
     })
   }
 
   const deleteRow = (id) => {
-    if (!testMode) return
+    if (!canUseTestMode) return
     deleteDeliveryOrder(id)
       .then(() => setDeliveryOrders((prev) => prev.filter((row) => row.id !== id)))
       .catch((e) => console.error('Delete delivery order error:', e))
@@ -309,12 +328,12 @@ export default function DeliveryOrderTrackingPage() {
         payload: { ...payload },
         onApplied: () => {
           pendingBulkRowIdsRef.current = null
-          onApplied?.()
+          onApplied?.(rowIds)
         },
       })
     } else {
       pendingBulkRowIdsRef.current = null
-      onApplied?.()
+      onApplied?.([leadRowId])
     }
   }
 
@@ -325,13 +344,13 @@ export default function DeliveryOrderTrackingPage() {
     }
     setSelectedInvoiceIds([])
     setBulkApplyConfirmModal({ open: false, rowIds: [], payload: null, onApplied: null })
-    onApplied?.()
+    onApplied?.(rowIds)
   }
 
   const handleBulkApplyNo = () => {
     const { onApplied } = bulkApplyConfirmModal
     setBulkApplyConfirmModal({ open: false, rowIds: [], payload: null, onApplied: null })
-    onApplied?.()
+    pendingBulkRowIdsRef.current = null
   }
 
   const handleDateChange = (rowId, value) => {
@@ -355,6 +374,19 @@ export default function DeliveryOrderTrackingPage() {
     setDeliveryOrderDatePickerRow(null)
   }
 
+  const openNextAttachmentOrClose = () => {
+    setAttachmentRowQueue((prev) => {
+      const next = prev.slice(1)
+      if (next.length > 0) {
+        setAttachmentModal({ open: true, rowId: next[0] })
+        setAttachmentType('none')
+      } else {
+        setAttachmentModal({ open: false, rowId: null })
+      }
+      return next
+    })
+  }
+
   const handleDeliverySlotSelect = (slot) => {
     if (!deliveryModal.rowId) return
     const rowId = deliveryModal.rowId
@@ -373,9 +405,16 @@ export default function DeliveryOrderTrackingPage() {
     flushSync(() => {
       setDeliveryModal({ open: false, rowId: null, dateLabel: '' })
     })
-    afterBulkableCommit(rowId, payload, () => {})
-    setAttachmentModal({ open: true, rowId })
-    setAttachmentType('none')
+    afterBulkableCommit(rowId, payload, (rowIds) => {
+      if (!rowIds || rowIds.length === 0) return
+      if (rowIds.length > 1) {
+        setAttachmentRowQueue(rowIds)
+        setAttachmentModal({ open: true, rowId: rowIds[0] })
+      } else {
+        setAttachmentModal({ open: true, rowId: rowIds[0] })
+      }
+      setAttachmentType('none')
+    })
   }
 
   const handleDiscrepancyCheck = (rowId, checked) => {
@@ -422,7 +461,7 @@ export default function DeliveryOrderTrackingPage() {
     const newPhase = getPhase(newStatus)
 
     // Phase 5 (Completed) cannot backtrack to any earlier phase (unless Test Mode is on)
-    if (currentPhase === 5 && newPhase < 5 && !testMode) {
+    if (currentPhase === 5 && newPhase < 5 && !canUseTestMode) {
       setPhase4LockedNoticeOpen(true)
       return
     }
@@ -430,6 +469,12 @@ export default function DeliveryOrderTrackingPage() {
     // Phase 2 → Phase 1 (Billed): confirm backtrack and reset progress
     if (currentPhase === 2 && newStatus === 'Billed') {
       setBacktrackPhase2To1Modal({ open: true, rowId })
+      return
+    }
+
+    // Phase 3 → Phase 1 (Billed): confirm backtrack and reset progress
+    if (currentPhase === 3 && newStatus === 'Billed') {
+      setBacktrackPhase3To1Modal({ open: true, rowId })
       return
     }
 
@@ -469,6 +514,10 @@ export default function DeliveryOrderTrackingPage() {
     }
     if (newStatus === 'Completed') {
       setCompletedConfirmModal({ open: true, rowId })
+      return
+    }
+    if (newStatus === 'Cancelled') {
+      setCancelledConfirmModal({ open: true, rowId })
       return
     }
     const clearDriverForHoldOrChop =
@@ -715,6 +764,33 @@ export default function DeliveryOrderTrackingPage() {
     setBacktrackPhase2To1Modal({ open: false, rowId: null })
   }
 
+  const handleBacktrackPhase3To1Yes = () => {
+    const { rowId } = backtrackPhase3To1Modal
+    const row = deliveryOrders.find((r) => r.id === rowId)
+    const payload = rowId && row ? {
+      status: 'Billed',
+      assignedDriverId: null,
+      assignedSalesmanId: null,
+      assignedClerkId: null,
+      transferWarehouseId: null,
+      holdWarehouseId: null,
+      holdWarehouseType: '',
+      deliveryDate: '',
+      deliverySlot: '',
+      remark: row.remarkAtBilled ?? '',
+    } : null
+    if (rowId && payload) {
+      updateRow(rowId, payload)
+      afterBulkableCommit(rowId, payload, () => setBacktrackPhase3To1Modal({ open: false, rowId: null }))
+    } else {
+      setBacktrackPhase3To1Modal({ open: false, rowId: null })
+    }
+  }
+
+  const handleBacktrackPhase3To1No = () => {
+    setBacktrackPhase3To1Modal({ open: false, rowId: null })
+  }
+
   const handlePhase3ToOtherPhase2Yes = () => {
     const { rowId, newStatus, previousStatus } = phase3ToOtherPhase2Modal
     if (!rowId) {
@@ -812,6 +888,17 @@ export default function DeliveryOrderTrackingPage() {
     setCompletedConfirmModal({ open: false, rowId: null })
   }
 
+  const handleCancelledConfirmYes = () => {
+    const { rowId } = cancelledConfirmModal
+    const payload = { status: 'Cancelled' }
+    if (rowId) updateRow(rowId, payload)
+    afterBulkableCommit(rowId, payload, () => setCancelledConfirmModal({ open: false, rowId: null }))
+  }
+
+  const handleCancelledConfirmNo = () => {
+    setCancelledConfirmModal({ open: false, rowId: null })
+  }
+
   const handleChopSignWarehouseNo = () => {
     const { rowId, previousStatus } = chopSignWarehouseConfirmModal
     setChopSignWarehouseConfirmModal({ open: false, rowId: null, previousStatus: '' })
@@ -889,12 +976,21 @@ export default function DeliveryOrderTrackingPage() {
                 deliverySlot: '',
               }
             : { deliveryDate: dateToSave, deliverySlot: '' }
-          afterBulkableCommit(rowIdToUse, payload, () => {})
-          // Always open attachment modal after date (Salesman path) - not inside callback
-          setTimeout(() => {
-            setAttachmentModal({ open: true, rowId: rowIdToUse })
-            setAttachmentType('none')
-          }, 100)
+          afterBulkableCommit(rowIdToUse, payload, (rowIds) => {
+            if (!rowIds || rowIds.length === 0) return
+            if (rowIds.length > 1) {
+              setAttachmentRowQueue(rowIds)
+              setTimeout(() => {
+                setAttachmentModal({ open: true, rowId: rowIds[0] })
+                setAttachmentType('none')
+              }, 100)
+            } else {
+              setTimeout(() => {
+                setAttachmentModal({ open: true, rowId: rowIds[0] })
+                setAttachmentType('none')
+              }, 100)
+            }
+          })
         }
       }
     } catch (e) {
@@ -951,11 +1047,13 @@ export default function DeliveryOrderTrackingPage() {
     const rowId = attachmentModal.rowId
     if (!rowId) {
       setAttachmentModal({ open: false, rowId: null })
+      setAttachmentRowQueue([])
       return
     }
     if (attachmentType === 'none') {
       setAttachmentModal({ open: false, rowId: null })
       setAttachmentType('none')
+      openNextAttachmentOrClose()
       return
     }
     const deliveryOrderRow = deliveryOrders.find((r) => r.id === rowId)
@@ -977,6 +1075,7 @@ export default function DeliveryOrderTrackingPage() {
   const handleAttachmentCancel = () => {
     setAttachmentModal({ open: false, rowId: null })
     setAttachmentType('none')
+    openNextAttachmentOrClose()
   }
 
   const getFilteredInvoicesForSearch = () => {
@@ -1025,6 +1124,7 @@ export default function DeliveryOrderTrackingPage() {
     setInvoiceSearchList([])
     setInvoiceSearchQuery('')
     setInvoiceSearchSelectedId(null)
+    openNextAttachmentOrClose()
   }
 
   const handleInvoiceSearchCancel = () => {
@@ -1032,6 +1132,7 @@ export default function DeliveryOrderTrackingPage() {
     setInvoiceSearchList([])
     setInvoiceSearchQuery('')
     setInvoiceSearchSelectedId(null)
+    openNextAttachmentOrClose()
   }
 
   const handleAddDeliveryOrderApplyDateToAllChange = (checked) => {
@@ -1203,7 +1304,22 @@ export default function DeliveryOrderTrackingPage() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between gap-4">
+      <div className="flex items-center justify-between gap-4 flex-wrap">
+        <div className="flex items-center gap-2 min-w-0">
+          <label htmlFor="delivery-order-no-search" className="text-sm font-medium text-slate-700 shrink-0">
+            Delivery Order No.
+          </label>
+          <input
+            id="delivery-order-no-search"
+            type="text"
+            value={deliveryOrderSearchQuery}
+            onChange={(e) => setDeliveryOrderSearchQuery(e.target.value)}
+            placeholder="Search by delivery order no."
+            className="py-2 px-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-900 focus:border-blue-900 w-48 max-w-full text-sm"
+            aria-label="Search by delivery order number"
+          />
+        </div>
+        <div className="flex items-center gap-4 shrink-0">
         <button
           type="button"
           onClick={() => {
@@ -1217,30 +1333,16 @@ export default function DeliveryOrderTrackingPage() {
           <Plus size={18} />
           Add New Delivery Order
         </button>
-        <label className="flex items-center gap-2 cursor-pointer">
-          <span className="text-sm font-medium text-slate-700">Test Mode</span>
-          <button
-            type="button"
-            role="switch"
-            aria-checked={testMode}
-            onClick={() => setTestMode((v) => !v)}
-            className={`relative inline-flex h-6 w-11 shrink-0 rounded-full transition-colors ${
-              testMode ? 'bg-blue-900' : 'bg-slate-300'
-            }`}
-          >
-            <span
-              className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${
-                testMode ? 'translate-x-6' : 'translate-x-0.5'
-              }`}
-              style={{ marginTop: 2 }}
-            />
-          </button>
-        </label>
+        </div>
       </div>
 
       <div className="bg-white rounded-lg shadow border border-slate-200 overflow-x-auto">
         {deliveryOrdersLoading ? (
           <div className="p-8 text-center text-slate-500">Loading delivery orders…</div>
+        ) : filteredDeliveryOrders.length === 0 ? (
+          <div className="p-8 text-center text-slate-500">
+            {deliveryOrderSearchQuery.trim() ? 'No delivery orders match your search.' : 'No delivery orders added yet. Click &quot;Add New Delivery Order&quot; to add one.'}
+          </div>
         ) : (
         <table className="w-full min-w-[900px] text-sm">
           <thead>
@@ -1248,9 +1350,9 @@ export default function DeliveryOrderTrackingPage() {
               <th className="text-left py-3 px-4 font-semibold text-slate-700 w-12">
                 <input
                   type="checkbox"
-                  checked={deliveryOrders.length > 0 && selectedInvoiceIds.length === deliveryOrders.length}
+                  checked={filteredDeliveryOrders.length > 0 && selectedInvoiceIds.length === filteredDeliveryOrders.length}
                   onChange={(e) => {
-                    if (e.target.checked) setSelectedInvoiceIds(deliveryOrders.map((r) => r.id))
+                    if (e.target.checked) setSelectedInvoiceIds(filteredDeliveryOrders.map((r) => r.id))
                     else setSelectedInvoiceIds([])
                   }}
                   onClick={(e) => e.stopPropagation()}
@@ -1258,6 +1360,7 @@ export default function DeliveryOrderTrackingPage() {
                   aria-label="Select all delivery orders"
                 />
               </th>
+              <th className="text-left py-3 px-4 font-semibold text-slate-700 w-12" title="Alert when status has exceeded allowed duration">Alert</th>
               <th className="text-left py-3 px-4 font-semibold text-slate-700">Delivery Order No</th>
               <th className="text-left py-3 px-4 font-semibold text-slate-700">Delivery Order Date</th>
               <th className="text-left py-3 px-4 font-semibold text-slate-700">Status</th>
@@ -1265,11 +1368,11 @@ export default function DeliveryOrderTrackingPage() {
               <th className="text-left py-3 px-4 font-semibold text-slate-700">Assigned Date</th>
               <th className="text-left py-3 px-4 font-semibold text-slate-700">Remark</th>
               <th className="text-left py-3 px-4 font-semibold text-slate-700">Discrepancy</th>
-              {testMode && <th className="text-left py-3 px-4 font-semibold text-slate-700 w-14">Delete</th>}
+              {canUseTestMode && <th className="text-left py-3 px-4 font-semibold text-slate-700 w-14">Delete</th>}
             </tr>
           </thead>
           <tbody>
-            {deliveryOrders.map((row) => {
+            {filteredDeliveryOrders.map((row) => {
               const salesman = row.assignedSalesmanId
                 ? salesmen.find((s) => s.id === row.assignedSalesmanId)
                 : null
@@ -1285,9 +1388,10 @@ export default function DeliveryOrderTrackingPage() {
               const assignedDriver = row.assignedDriverId
                 ? drivers.find((d) => d.id === row.assignedDriverId)
                 : null
-              const canEditInvoiceFields = testMode
+              const canEditInvoiceFields = canUseTestMode
               const isRowCompleted = row.status === 'Completed'
-              const isCompletedLocked = isRowCompleted && !testMode
+              const isRowCancelled = row.status === 'Cancelled'
+              const isCompletedLocked = (isRowCompleted || isRowCancelled) && !canUseTestMode
               const canEditRow = canEditInvoiceFields && !isCompletedLocked
               const isDeliveryInProgress = row.status === 'Delivery In Progress'
               const isDelivered = row.status === 'Delivered'
@@ -1302,6 +1406,7 @@ export default function DeliveryOrderTrackingPage() {
                   row.status.startsWith('Chop & Sign -') ||
                   row.status.startsWith('Transfer') ||
                   row.status === 'Completed' ||
+                  row.status === 'Cancelled' ||
                   isDeliveryInProgress ||
                   isDelivered)
               const isAssignedDateInactive = row.status === 'Billed'
@@ -1354,8 +1459,9 @@ export default function DeliveryOrderTrackingPage() {
                 el?.closest?.('input, select, button, [role="button"]')
               return (
                 <tr
+                  id={`row-${row.id}`}
                   key={row.id}
-                  className="border-b border-slate-200 hover:bg-slate-50"
+                  className={`border-b border-slate-200 hover:bg-slate-50 ${String(highlightRowId) === String(row.id) ? 'highlight-row' : ''}`}
                   onClick={(e) => {
                     if (isInteractive(e.target)) return
                     setSelectedInvoiceIds((prev) => {
@@ -1380,6 +1486,13 @@ export default function DeliveryOrderTrackingPage() {
                       aria-label={`Select delivery order ${row.deliveryOrderNo || row.id}`}
                     />
                   </td>
+                  <td className="py-2 px-4 w-12 text-center" title={isStatusOverdue(row) ? `Status "${row.status}" has exceeded the allowed duration (Phase ${getPhase(row.status)})` : ''}>
+                    {isStatusOverdue(row) ? (
+                      <AlertTriangle size={20} className="text-amber-500 inline-block" aria-label="Status overdue" />
+                    ) : (
+                      <span className="text-slate-300" aria-hidden>–</span>
+                    )}
+                  </td>
                   <td className="py-2 px-4">
                     <span className="py-1.5 px-2 block text-slate-700">
                       {row.deliveryOrderNo || '–'}
@@ -1393,7 +1506,7 @@ export default function DeliveryOrderTrackingPage() {
                   <td className="py-2 px-4">
                     {isCompletedLocked ? (
                       <span className="py-1.5 px-2 block min-w-[180px] text-slate-700">
-                        Completed
+                        {row.status}
                       </span>
                     ) : (
                       <div className="min-w-[180px]">
@@ -1469,24 +1582,30 @@ export default function DeliveryOrderTrackingPage() {
                             <span className="text-slate-500 text-xs">No details</span>
                           ) : null}
                         </>
-                      ) : (
+                      ) : row.discrepancy?.checked ? (
                         <>
-                          <input
-                            type="checkbox"
-                            checked={row.discrepancy?.checked ?? false}
-                            onChange={(e) =>
-                              e.target.checked
-                                ? handleDiscrepancyCheck(row.id, true)
-                                : handleDiscrepancyCheck(row.id, false)
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setDiscrepancyModal({
+                                open: true,
+                                rowId: row.id,
+                                title: row.discrepancy?.title || '',
+                                description: row.discrepancy?.description || '',
+                              })
                             }
-                            className="rounded border-slate-300 text-blue-900 focus:ring-blue-900"
-                          />
-                          {row.discrepancy?.checked && row.discrepancy?.title ? (
+                            className="p-1.5 rounded text-slate-600 hover:bg-slate-100"
+                            title="Edit discrepancy"
+                            aria-label="Edit discrepancy"
+                          >
+                            <Pencil size={18} />
+                          </button>
+                          {row.discrepancy?.title ? (
                             <span
-                              className="relative group/tip max-w-[120px] truncate"
+                              className="relative group/tip max-w-[120px] truncate text-slate-700"
                               title={row.discrepancy?.description}
                             >
-                              <span className="text-slate-700">{row.discrepancy.title}</span>
+                              {row.discrepancy.title}
                               {row.discrepancy.description && (
                                 <span className="absolute left-0 bottom-full mb-1 hidden group-hover/tip:block z-10 py-2 px-3 bg-slate-800 text-white text-xs rounded shadow-lg max-w-[220px] whitespace-normal">
                                   {row.discrepancy.description}
@@ -1494,28 +1613,22 @@ export default function DeliveryOrderTrackingPage() {
                               )}
                             </span>
                           ) : (
-                            row.discrepancy?.checked && (
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  setDiscrepancyModal({
-                                    open: true,
-                                    rowId: row.id,
-                                    title: row.discrepancy?.title || '',
-                                    description: row.discrepancy?.description || '',
-                                  })
-                                }
-                                className="text-blue-900 text-xs underline"
-                              >
-                                Add details
-                              </button>
-                            )
+                            <span className="text-slate-500 text-xs">No details</span>
                           )}
+                        </>
+                      ) : (
+                        <>
+                          <input
+                            type="checkbox"
+                            checked={false}
+                            onChange={(e) => e.target.checked && handleDiscrepancyCheck(row.id, true)}
+                            className="rounded border-slate-300 text-blue-900 focus:ring-blue-900"
+                          />
                         </>
                       )}
                     </div>
                   </td>
-                  {testMode && !isCompletedLocked && (
+                  {canUseTestMode && !isCompletedLocked && (
                     <td className="py-2 px-4">
                       <button
                         type="button"
@@ -1856,6 +1969,11 @@ export default function DeliveryOrderTrackingPage() {
           discrepancyModal.rowId &&
           handleDiscrepancySave(discrepancyModal.rowId, { title, description })
         }
+        onRemove={
+          discrepancyModal.rowId
+            ? () => handleDiscrepancyCancel(discrepancyModal.rowId)
+            : undefined
+        }
       />
 
       <SelectSalesmanModal
@@ -2044,6 +2162,40 @@ export default function DeliveryOrderTrackingPage() {
         </div>
       )}
 
+      {cancelledConfirmModal.open && (() => {
+        const row = deliveryOrders.find((r) => r.id === cancelledConfirmModal.rowId)
+        const serial = row?.deliveryOrderNo || cancelledConfirmModal.rowId || 'this document'
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50" onClick={handleCancelledConfirmNo}>
+            <div
+              className="bg-white rounded-lg shadow-xl max-w-sm w-full p-6"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <h3 className="text-lg font-semibold text-slate-800 mb-3">Confirm cancellation</h3>
+              <p className="text-slate-600 text-sm mb-4">
+                Confirm cancellation of <strong>{serial}</strong>? Once cancelled, this document can no longer be edited.
+              </p>
+              <div className="flex gap-2 justify-end">
+                <button
+                  type="button"
+                  onClick={handleCancelledConfirmNo}
+                  className="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg"
+                >
+                  No
+                </button>
+                <button
+                  type="button"
+                  onClick={handleCancelledConfirmYes}
+                  className="px-4 py-2 bg-blue-900 text-white rounded-lg hover:bg-blue-800"
+                >
+                  Yes, cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        )
+      })()}
+
       {rearrangeDeliveryConfirmModal.open && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50" onClick={handleRearrangeDeliveryNo}>
           <div
@@ -2140,6 +2292,36 @@ export default function DeliveryOrderTrackingPage() {
               <button
                 type="button"
                 onClick={handleBacktrackPhase2To1Yes}
+                className="px-4 py-2 bg-blue-900 text-white rounded-lg hover:bg-blue-800"
+              >
+                Yes
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {backtrackPhase3To1Modal.open && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50" onClick={handleBacktrackPhase3To1No}>
+          <div
+            className="bg-white rounded-lg shadow-xl max-w-sm w-full p-6"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-lg font-semibold text-slate-800 mb-3">Backtrack progress?</h3>
+            <p className="text-slate-600 text-sm mb-4">
+              Are you sure you want to backtrack the progress? All progress in current status will be reset.
+            </p>
+            <div className="flex gap-2 justify-end">
+              <button
+                type="button"
+                onClick={handleBacktrackPhase3To1No}
+                className="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg"
+              >
+                No
+              </button>
+              <button
+                type="button"
+                onClick={handleBacktrackPhase3To1Yes}
                 className="px-4 py-2 bg-blue-900 text-white rounded-lg hover:bg-blue-800"
               >
                 Yes

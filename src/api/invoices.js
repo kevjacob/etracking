@@ -1,7 +1,8 @@
 /**
- * Local-only storage for invoices. All data saved in localStorage on this machine.
- * No Supabase or network. Use this while building; add Supabase later when ready.
+ * Invoices (ESD). Uses Supabase when configured, else localStorage.
  */
+import { supabase, isSupabaseConfigured } from '../supabaseClient'
+import { toSnakeCase, fromSnakeCase } from '../lib/dbMappers'
 
 const STORAGE_KEY = 'etracking_invoices'
 
@@ -29,19 +30,37 @@ function saveInvoices(invoices) {
 }
 
 export async function fetchInvoices() {
+  if (isSupabaseConfigured()) {
+    const { data, error } = await supabase.from('invoices').select('*').order('created_at', { ascending: true })
+    if (error) throw error
+    return (data || []).map(fromSnakeCase)
+  }
   return loadInvoices()
 }
 
 export async function insertInvoice(row) {
+  if (isSupabaseConfigured()) {
+    const { id, ...rest } = row
+    const payload = toSnakeCase(rest)
+    const { data, error } = await supabase.from('invoices').insert(payload).select('*').single()
+    if (error) throw error
+    return fromSnakeCase(data)
+  }
   const invoices = loadInvoices()
-  const id = generateId()
-  const newRow = { ...row, id }
+  const newId = generateId()
+  const newRow = { ...row, id: newId }
   invoices.push(newRow)
   saveInvoices(invoices)
   return newRow
 }
 
 export async function updateInvoice(id, row) {
+  if (isSupabaseConfigured()) {
+    const payload = toSnakeCase({ ...row, id })
+    const { data, error } = await supabase.from('invoices').update(payload).eq('id', id).select('*').single()
+    if (error) throw error
+    return fromSnakeCase(data)
+  }
   const invoices = loadInvoices()
   const index = invoices.findIndex((r) => r.id === id)
   if (index === -1) return row
@@ -52,6 +71,11 @@ export async function updateInvoice(id, row) {
 }
 
 export async function deleteInvoice(id) {
+  if (isSupabaseConfigured()) {
+    const { error } = await supabase.from('invoices').delete().eq('id', id)
+    if (error) throw error
+    return
+  }
   const invoices = loadInvoices().filter((r) => r.id !== id)
   saveInvoices(invoices)
 }

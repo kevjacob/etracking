@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { X } from 'lucide-react'
 
-export default function DiscrepancyModal({ isOpen, initialTitle, initialDesc, onClose, onSave }) {
+export default function DiscrepancyModal({ isOpen, initialTitle, initialDesc, onClose, onSave, onRemove }) {
   const [title, setTitle] = useState(initialTitle || '')
   const [description, setDescription] = useState(initialDesc || '')
 
@@ -13,7 +13,7 @@ export default function DiscrepancyModal({ isOpen, initialTitle, initialDesc, on
   const handleSubmit = (e) => {
     e.preventDefault()
     onSave({ title: title.trim(), description: description.trim() })
-    onClose()
+    // Do not call onClose() here: parent's onClose resets discrepancy. Parent closes modal in onSave.
   }
 
   if (!isOpen) return null
@@ -56,13 +56,28 @@ export default function DiscrepancyModal({ isOpen, initialTitle, initialDesc, on
               placeholder="Description"
             />
           </div>
-          <div className="flex justify-end gap-2 pt-2">
-            <button type="button" onClick={onClose} className="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg">
-              Cancel
-            </button>
-            <button type="submit" className="px-4 py-2 bg-blue-900 text-white rounded-lg hover:bg-blue-800">
-              Save
-            </button>
+          <div className="flex justify-between items-center gap-2 pt-2">
+            <div>
+              {onRemove && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onRemove()
+                  }}
+                  className="px-4 py-2 text-red-600 hover:bg-red-50 rounded-lg border border-red-200"
+                >
+                  Remove discrepancy
+                </button>
+              )}
+            </div>
+            <div className="flex gap-2">
+              <button type="button" onClick={onClose} className="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg">
+                Cancel
+              </button>
+              <button type="submit" className="px-4 py-2 bg-blue-900 text-white rounded-lg hover:bg-blue-800">
+                Save
+              </button>
+            </div>
           </div>
         </form>
       </div>

@@ -1,18 +1,28 @@
 import { useState } from 'react'
-import { Plus, Warehouse } from 'lucide-react'
+import { Plus, Warehouse, Pencil } from 'lucide-react'
 import { useWarehouses } from '../context/WarehousesContext'
 import AddWarehouseModal from '../components/AddWarehouseModal'
 
 export default function WarehouseMaintenancePage() {
   const [modalOpen, setModalOpen] = useState(false)
+  const [editingWarehouse, setEditingWarehouse] = useState(null)
   const { warehouses } = useWarehouses()
+
+  const openEdit = (w) => {
+    setEditingWarehouse(w)
+    setModalOpen(true)
+  }
+  const closeModal = () => {
+    setModalOpen(false)
+    setEditingWarehouse(null)
+  }
 
   return (
     <div className="max-w-3xl mx-auto">
       <div className="flex justify-end mb-6">
         <button
           type="button"
-          onClick={() => setModalOpen(true)}
+          onClick={() => { setEditingWarehouse(null); setModalOpen(true) }}
           className="inline-flex items-center gap-2 px-4 py-2.5 bg-blue-900 text-white rounded-lg hover:bg-blue-800 transition-colors font-medium shadow"
         >
           <Plus size={18} />
@@ -28,18 +38,26 @@ export default function WarehouseMaintenancePage() {
         ) : (
           <ul className="divide-y divide-slate-200">
             {warehouses.map((w) => (
-              <li key={w.id} className="flex items-center gap-3 px-5 py-3 hover:bg-slate-50">
+              <li key={w.id} className="flex items-center gap-3 px-5 py-3 hover:bg-slate-50 group">
                 <Warehouse size={18} className="text-slate-400 shrink-0" />
                 <div className="min-w-0 flex-1">
                   <span className="font-medium text-slate-800">{w.name}</span>
                   {w.picName && <span className="text-slate-500 text-sm ml-2">PIC: {w.picName}</span>}
                 </div>
+                <button
+                  type="button"
+                  onClick={() => openEdit(w)}
+                  className="p-2 rounded-lg text-slate-400 hover:text-blue-900 hover:bg-slate-100 opacity-0 group-hover:opacity-100 transition-opacity"
+                  aria-label="Edit warehouse"
+                >
+                  <Pencil size={16} />
+                </button>
               </li>
             ))}
           </ul>
         )}
       </div>
-      <AddWarehouseModal isOpen={modalOpen} onClose={() => setModalOpen(false)} onSaved={() => {}} />
+      <AddWarehouseModal isOpen={modalOpen} onClose={closeModal} onSaved={() => {}} warehouse={editingWarehouse} />
     </div>
   )
 }
