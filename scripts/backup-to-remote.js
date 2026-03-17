@@ -1,6 +1,6 @@
 /**
  * Backup/sync data from local Supabase (Docker) to online Supabase.
- * Excludes all chat data. Run once per hour via run-backup-daemon.js or cron.
+ * Includes chat_messages. Run once per hour via run-backup-daemon.js or cron.
  *
  * Requires: .env with
  *   VITE_SUPABASE_URL (or SUPABASE_LOCAL_URL) + VITE_SUPABASE_ANON_KEY (or SUPABASE_LOCAL_ANON_KEY) = local Docker
@@ -94,6 +94,7 @@ const TABLES = [
   'credit_notes',
   'grn',
   'delivery_orders',
+  'chat_messages',
 ]
 
 async function syncTable(table) {
