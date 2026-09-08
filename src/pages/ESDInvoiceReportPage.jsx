@@ -6,6 +6,7 @@ import { useAuth } from '../context/AuthContext'
 import { useEmployees } from '../context/EmployeesContext'
 import { fetchInvoices } from '../api/invoices'
 import { formatDate } from '../utils/dateFormat'
+import { getAdditionalRemarkText } from '../utils/additionalRemark'
 
 const STATUS_OPTIONS = [
   'Billed',
@@ -34,10 +35,9 @@ function getAssignedToDisplay(row, employees) {
   return parts.length ? parts.join(', ') : '–'
 }
 
-function discrepancyDisplay(discrepancy) {
-  if (!discrepancy || !discrepancy.checked) return 'No'
-  const t = discrepancy.title ? `: ${discrepancy.title}` : ''
-  return `Yes${t}`
+function additionalRemarkDisplay(discrepancy) {
+  const text = getAdditionalRemarkText(discrepancy)
+  return text || '–'
 }
 
 export default function ESDInvoiceReportPage() {
@@ -379,7 +379,7 @@ export default function ESDInvoiceReportPage() {
                   <th className="text-left py-3 px-4 font-semibold text-slate-700">Status</th>
                   <th className="text-left py-3 px-4 font-semibold text-slate-700">Assigned To</th>
                   <th className="text-left py-3 px-4 font-semibold text-slate-700">Remark</th>
-                  <th className="text-left py-3 px-4 font-semibold text-slate-700">Discrepancy</th>
+                  <th className="text-left py-3 px-4 font-semibold text-slate-700">Additional Remark</th>
                 </tr>
               </thead>
               <tbody>
@@ -402,7 +402,7 @@ export default function ESDInvoiceReportPage() {
                         {row.remark || '–'}
                       </td>
                       <td className="py-2 px-4 text-slate-700">
-                        {discrepancyDisplay(row.discrepancy)}
+                        {additionalRemarkDisplay(row.discrepancy)}
                       </td>
                     </tr>
                   ))
@@ -473,7 +473,7 @@ export default function ESDInvoiceReportPage() {
                         <th className="border border-slate-200 py-2 px-3 text-left font-semibold">Status</th>
                         <th className="border border-slate-200 py-2 px-3 text-left font-semibold">Assigned To</th>
                         <th className="border border-slate-200 py-2 px-3 text-left font-semibold">Remark</th>
-                        <th className="border border-slate-200 py-2 px-3 text-left font-semibold">Discrepancy</th>
+                        <th className="border border-slate-200 py-2 px-3 text-left font-semibold">Additional Remark</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -491,7 +491,7 @@ export default function ESDInvoiceReportPage() {
                             <td className="border border-slate-200 py-2 px-3">{row.status || '–'}</td>
                             <td className="border border-slate-200 py-2 px-3">{getAssignedToDisplay(row, employees)}</td>
                             <td className="border border-slate-200 py-2 px-3 max-w-[180px]">{row.remark || '–'}</td>
-                            <td className="border border-slate-200 py-2 px-3">{discrepancyDisplay(row.discrepancy)}</td>
+                            <td className="border border-slate-200 py-2 px-3">{additionalRemarkDisplay(row.discrepancy)}</td>
                           </tr>
                         ))
                       )}

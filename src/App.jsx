@@ -11,12 +11,15 @@ import AccountManagementPage from './pages/AccountManagementPage'
 import UpdateAccountPage from './pages/UpdateAccountPage'
 import JsonImportExportPage from './pages/JsonImportExportPage'
 import ImportDocumentPage from './pages/ImportDocumentPage'
+import AlertSettingPage from './pages/AlertSettingPage'
 import ESDInvoiceTrackingPage from './pages/ESDInvoiceTrackingPage'
 import AutocountInvoiceTrackingPage from './pages/AutocountInvoiceTrackingPage'
 import CreditNoteTrackingPage from './pages/CreditNoteTrackingPage'
 import DeliveryOrderTrackingPage from './pages/DeliveryOrderTrackingPage'
 import GRNTrackingPage from './pages/GRNTrackingPage'
-import ESDInvoiceReportPage from './pages/ESDInvoiceReportPage'
+import GRCTrackingPage from './pages/GRCTrackingPage'
+import IDTTrackingPage from './pages/IDTTrackingPage'
+import LeadTimeAgingReportPage from './pages/LeadTimeAgingReportPage'
 
 export default function App() {
   return (
@@ -32,12 +35,15 @@ export default function App() {
         <Route path="maintenance/update-account" element={<UpdateAccountPage />} />
         <Route path="maintenance/json-import-export" element={<JsonImportExportPage />} />
         <Route path="maintenance/import-document" element={<ImportDocumentPage />} />
+        <Route path="maintenance/alert-setting" element={<AlertSettingPage />} />
         <Route path="etracking/invoice" element={<ESDInvoiceTrackingPage />} />
         <Route path="etracking/autocount-invoice" element={<AutocountInvoiceTrackingPage />} />
         <Route path="etracking/credit-note" element={<CreditNoteTrackingPage />} />
         <Route path="etracking/delivery-order" element={<DeliveryOrderTrackingPage />} />
         <Route path="etracking/grn" element={<GRNTrackingPage />} />
-        <Route path="report/esd-invoice" element={<ESDInvoiceReportPage />} />
+        <Route path="etracking/grc" element={<GRCTrackingPage />} />
+        <Route path="etracking/idt" element={<IDTTrackingPage />} />
+        <Route path="report/lead-time-aging" element={<LeadTimeAgingReportPage />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

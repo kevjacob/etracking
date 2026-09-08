@@ -7,8 +7,11 @@ import { fetchInvoices as fetchESDInvoices } from '../api/invoices'
 import { fetchInvoices as fetchAutocountInvoices } from '../api/autocountInvoices'
 import { fetchDeliveryOrders } from '../api/deliveryOrders'
 import { fetchGRNs } from '../api/grn'
+import { fetchGRCs } from '../api/grc'
+import { fetchIDTs } from '../api/idt'
 import { formatDate } from '../utils/dateFormat'
-import { isStatusOverdue } from '../utils/alertStatus'
+import { isStatusOverdue, isCodOverdue } from '../utils/alertStatus'
+import { useAlertSettings } from '../context/AlertSettingsContext'
 
 const ROW_HEIGHT = 52
 const VISIBLE_ROWS = 5
@@ -67,6 +70,7 @@ function AlertBox({ title, items, getSerial, getDate, getStatus, getLastUpdate, 
 
 export default function Home() {
   const { user, isSuperuser } = useAuth()
+  const { settings: alertSettings } = useAlertSettings()
   const [announcements, setAnnouncements] = useState([])
   const [loadingAnnouncements, setLoadingAnnouncements] = useState(false)
   const [viewingAnnouncement, setViewingAnnouncement] = useState(null)
@@ -74,6 +78,8 @@ export default function Home() {
   const [autocountInvoices, setAutocountInvoices] = useState([])
   const [deliveryOrders, setDeliveryOrders] = useState([])
   const [grns, setGrns] = useState([])
+  const [grcs, setGrcs] = useState([])
+  const [idts, setIdts] = useState([])
   const [loadingAlerts, setLoadingAlerts] = useState(false)
 
   useEffect(() => {
@@ -93,18 +99,24 @@ export default function Home() {
       fetchAutocountInvoices(),
       fetchDeliveryOrders(),
       fetchGRNs(),
+      fetchGRCs(),
+      fetchIDTs(),
     ])
-      .then(([esd, autocount, doList, grnList]) => {
+      .then(([esd, autocount, doList, grnList, grcList, idtList]) => {
         setEsdInvoices(Array.isArray(esd) ? esd : [])
         setAutocountInvoices(Array.isArray(autocount) ? autocount : [])
         setDeliveryOrders(Array.isArray(doList) ? doList : [])
         setGrns(Array.isArray(grnList) ? grnList : [])
+        setGrcs(Array.isArray(grcList) ? grcList : [])
+        setIdts(Array.isArray(idtList) ? idtList : [])
       })
       .catch(() => {
         setEsdInvoices([])
         setAutocountInvoices([])
         setDeliveryOrders([])
         setGrns([])
+        setGrcs([])
+        setIdts([])
       })
       .finally(() => setLoadingAlerts(false))
   }, [user?.username])
@@ -112,51 +124,71 @@ export default function Home() {
   const esdAlert = useMemo(
     () =>
       sortByDate(
-        esdInvoices.filter((row) => row.status !== 'Completed' && row.status !== 'Cancelled' && isStatusOverdue(row)),
+        esdInvoices.filter((row) => row.status !== 'Completed' && row.status !== 'Cancelled' && isStatusOverdue(row, alertSettings)),
         (r) => r.dateOfInvoice
       ),
-    [esdInvoices]
+    [esdInvoices, alertSettings]
   )
   const autocountAlert = useMemo(
     () =>
       sortByDate(
         autocountInvoices.filter(
-          (row) => row.status !== 'Completed' && row.status !== 'Cancelled' && isStatusOverdue(row)
+          (row) => row.status !== 'Completed' && row.status !== 'Cancelled' && isStatusOverdue(row, alertSettings)
         ),
         (r) => r.dateOfInvoice
       ),
-    [autocountInvoices]
+    [autocountInvoices, alertSettings]
   )
   const doAlert = useMemo(
     () =>
       sortByDate(
         deliveryOrders.filter(
-          (row) => row.status !== 'Completed' && row.status !== 'Cancelled' && isStatusOverdue(row)
+          (row) => row.status !== 'Completed' && row.status !== 'Cancelled' && isStatusOverdue(row, alertSettings)
         ),
         (r) => r.deliveryOrderDate
       ),
-    [deliveryOrders]
+    [deliveryOrders, alertSettings]
   )
   const grnAlert = useMemo(
     () =>
       sortByDate(
         grns.filter(
-          (row) => row.status !== 'Completed' && row.status !== 'Cancelled' && isStatusOverdue(row)
+          (row) => row.status !== 'Completed' && row.status !== 'Cancelled' && isStatusOverdue(row, alertSettings)
         ),
         (r) => r.grnDate
       ),
-    [grns]
+    [grns, alertSettings]
+  )
+  const grcAlert = useMemo(
+    () =>
+      sortByDate(
+        grcs.filter(
+          (row) => row.status !== 'Completed' && row.status !== 'Cancelled' && isStatusOverdue(row, alertSettings)
+        ),
+        (r) => r.grcDate
+      ),
+    [grcs, alertSettings]
+  )
+  const idtAlert = useMemo(
+    () =>
+      sortByDate(
+        idts.filter(
+          (row) => row.status !== 'Completed' && row.status !== 'Cancelled' && isStatusOverdue(row, alertSettings)
+        ),
+        (r) => r.idtDate
+      ),
+    [idts, alertSettings]
   )
   const codNotComplete = useMemo(() => {
     const esdCod = (esdInvoices || [])
-      .filter((r) => r.cod === true && r.status !== 'Completed' && r.status !== 'Cancelled')
+      .filter((r) => isCodOverdue(r, alertSettings))
       .map((r) => ({ ...r, _source: 'esd' }))
     const autoCod = (autocountInvoices || [])
-      .filter((r) => r.cod === true && r.status !== 'Completed' && r.status !== 'Cancelled')
+      .filter((r) => isCodOverdue(r, alertSettings))
       .map((r) => ({ ...r, _source: 'autocount' }))
     const combined = [...esdCod, ...autoCod]
     return sortByDate(combined, (r) => r.dateOfInvoice)
-  }, [esdInvoices, autocountInvoices])
+  }, [esdInvoices, autocountInvoices, alertSettings])
 
   if (!user?.username) {
     return (
@@ -244,7 +276,7 @@ export default function Home() {
         {loadingAlerts ? (
           <p className="text-slate-500 text-sm">Loading alerts…</p>
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <AlertBox
               title="ESD Invoice"
               items={esdAlert}
@@ -284,6 +316,26 @@ export default function Home() {
               getLastUpdate={(r) => r.statusUpdatedAt}
               getLink={(r) => `/etracking/grn#row-${r.id}`}
               emptyMessage="No GRNs on alert."
+            />
+            <AlertBox
+              title="GRC"
+              items={grcAlert}
+              getSerial={(r) => r.grcNo}
+              getDate={(r) => r.grcDate}
+              getStatus={(r) => r.status}
+              getLastUpdate={(r) => r.statusUpdatedAt}
+              getLink={(r) => `/etracking/grc#row-${r.id}`}
+              emptyMessage="No GRCs on alert."
+            />
+            <AlertBox
+              title="IDT"
+              items={idtAlert}
+              getSerial={(r) => r.idtNo}
+              getDate={(r) => r.idtDate}
+              getStatus={(r) => r.status}
+              getLastUpdate={(r) => r.statusUpdatedAt}
+              getLink={(r) => `/etracking/idt#row-${r.id}`}
+              emptyMessage="No IDTs on alert."
             />
             <AlertBox
               title="C.O.D"

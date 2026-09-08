@@ -1,8 +1,10 @@
 import { X, Warehouse } from 'lucide-react'
 import { useWarehouses } from '../context/WarehousesContext'
+import { filterOwnWarehouses } from '../utils/warehouseUtils'
 
-export default function SelectWarehouseModal({ isOpen, rowId, previousStatus, onClose, onSelect }) {
+export default function SelectWarehouseModal({ isOpen, rowId, previousStatus, onClose, onSelect, ownOnly = false }) {
   const { warehouses } = useWarehouses()
+  const list = ownOnly ? filterOwnWarehouses(warehouses) : warehouses
 
   const handleSelect = (warehouseId) => {
     onSelect(rowId, warehouseId)
@@ -24,11 +26,15 @@ export default function SelectWarehouseModal({ isOpen, rowId, previousStatus, on
           </button>
         </div>
         <div className="p-4 overflow-y-auto flex-1">
-          {warehouses.length === 0 ? (
-            <p className="text-slate-500 text-sm">No warehouses added. Add warehouses in Maintenance → Warehouse Maintenance.</p>
+          {list.length === 0 ? (
+            <p className="text-slate-500 text-sm">
+              {ownOnly
+                ? 'No own warehouses. Tick Own on a warehouse in Maintenance → Warehouse Maintenance.'
+                : 'No warehouses added. Add warehouses in Maintenance → Warehouse Maintenance.'}
+            </p>
           ) : (
             <ul className="space-y-1">
-              {warehouses.map((w) => (
+              {list.map((w) => (
                 <li key={w.id}>
                   <button
                     type="button"

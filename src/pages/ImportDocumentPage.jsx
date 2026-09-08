@@ -1,9 +1,10 @@
 import { useRef, useState } from 'react'
 import { Upload } from 'lucide-react'
 import * as XLSX from 'xlsx'
-import { fetchInvoices, insertInvoice, updateInvoice } from '../api/invoices'
-import { fetchInvoices as fetchAutocountInvoices, insertInvoice as insertAutocountInvoice, updateInvoice as updateAutocountInvoice } from '../api/autocountInvoices'
-import { fetchCreditNotes, insertCreditNote, updateCreditNote } from '../api/creditNotes'
+import { recordInitialStatus } from '../utils/recordStatusTransition'
+import { fetchInvoices, insertInvoice } from '../api/invoices'
+import { fetchInvoices as fetchAutocountInvoices, insertInvoice as insertAutocountInvoice } from '../api/autocountInvoices'
+import { fetchCreditNotes, insertCreditNote } from '../api/creditNotes'
 
 function getTodayDateStr() {
   const d = new Date()
@@ -21,6 +22,34 @@ function findDocumentIdColumnIndex(headers) {
     if (n === 'document id' || n === 'documentid') return i
   }
   return -1
+}
+
+function findDocNoColumnIndex(headers) {
+  for (let i = 0; i < headers.length; i++) {
+    const n = normalizeHeader(headers[i])
+    if (n === 'docno' || n === 'doc no' || n === 'document no' || n === 'document number') return i
+  }
+  return -1
+}
+
+/** Prefer Document ID; fall back to DocNo when Document ID is absent. */
+function findDocumentNumberColumnIndex(headers) {
+  const docIdCol = findDocumentIdColumnIndex(headers)
+  if (docIdCol >= 0) return docIdCol
+  return findDocNoColumnIndex(headers)
+}
+
+function findDocTypeColumnIndex(headers) {
+  for (let i = 0; i < headers.length; i++) {
+    const n = normalizeHeader(headers[i])
+    if (n === 'doctype' || n === 'doc type' || n === 'document type') return i
+  }
+  return -1
+}
+
+function normalizeDocType(value) {
+  if (value == null || value === '') return ''
+  return String(value).trim().toUpperCase()
 }
 
 function parseFileToRows(file) {
@@ -56,6 +85,27 @@ function parseFileToRows(file) {
       reader.readAsArrayBuffer(file)
     }
   })
+}
+
+function normalizeDocumentId(cell) {
+  if (cell == null || cell === '') return ''
+  if (typeof cell === 'number' && Number.isFinite(cell)) {
+    if (Number.isInteger(cell) || Math.abs(cell - Math.round(cell)) < 1e-6) {
+      return String(Math.round(cell))
+    }
+  }
+  const s = String(cell).trim()
+  if (/^\d+\.0+$/.test(s)) return s.replace(/\.0+$/, '')
+  return s
+}
+
+function buildExistingNoSet(rows, getNo) {
+  const set = new Set()
+  for (const row of rows) {
+    const no = normalizeDocumentId(getNo(row))
+    if (no) set.add(no)
+  }
+  return set
 }
 
 function buildInvoiceRow(documentId, importDate) {
@@ -98,173 +148,153 @@ function buildCreditNoteRow(documentId, importDate) {
   }
 }
 
-/** type: 'esd' | 'autocount' | 'creditNote' */
-function runImport(nonConflicting, overwriteConflicts, apis) {
-  const result = { invoicesCount: 0, autocountInvoicesCount: 0, creditNotesCount: 0, invoiceIds: [], autocountInvoiceIds: [], creditNoteIds: [] }
-  const { insertInvoice: insInv, insertAutocountInvoice: insAuto, insertCreditNote: insCN, updateInvoice: updInv, updateAutocountInvoice: updAuto, updateCreditNote: updCN } = apis
-  const promises = []
-  for (const e of nonConflicting.esd) {
-    promises.push(insInv(e.newRow).then((r) => { result.invoicesCount++; result.invoiceIds.push(r.invoiceNo) }))
+/** @returns {'esd' | 'autocount' | 'creditNote' | null} */
+function classifyImportDocument(docId, docType) {
+  const trimmed = (docId || '').trim()
+  if (!trimmed) return null
+  if (normalizeDocType(docType) === 'CN') return 'creditNote'
+  const upper = trimmed.toUpperCase()
+  if (upper.startsWith('CN')) return 'creditNote'
+  if (upper.startsWith('IV')) return 'autocount'
+  if (upper.startsWith('T')) return 'autocount'
+  if (!/[A-Za-z]/.test(trimmed)) return 'esd'
+  return null
+}
+
+async function runImport(toInsert) {
+  const result = {
+    invoicesCount: 0,
+    autocountInvoicesCount: 0,
+    creditNotesCount: 0,
+    invoiceIds: [],
+    autocountInvoiceIds: [],
+    creditNoteIds: [],
   }
-  for (const e of nonConflicting.autocount) {
-    promises.push(insAuto(e.newRow).then((r) => { result.autocountInvoicesCount++; result.autocountInvoiceIds.push(r.invoiceNo) }))
+  for (const e of toInsert.esd) {
+    const r = await insertInvoice(e.newRow)
+    result.invoicesCount++
+    result.invoiceIds.push(r.invoiceNo)
+    recordInitialStatus({
+      entityType: 'esd_invoice',
+      entityId: r.id,
+      documentNo: r.invoiceNo,
+      status: r.status || 'Billed',
+      statusAt: r.statusUpdatedAt,
+    })
   }
-  for (const e of nonConflicting.creditNote) {
-    promises.push(insCN(e.newRow).then((r) => { result.creditNotesCount++; result.creditNoteIds.push(r.creditNoteNo) }))
+  for (const e of toInsert.autocount) {
+    const r = await insertAutocountInvoice(e.newRow)
+    result.autocountInvoicesCount++
+    result.autocountInvoiceIds.push(r.invoiceNo)
+    recordInitialStatus({
+      entityType: 'autocount_invoice',
+      entityId: r.id,
+      documentNo: r.invoiceNo,
+      status: r.status || 'Billed',
+      statusAt: r.statusUpdatedAt,
+    })
   }
-  for (const c of overwriteConflicts) {
-    if (c.type === 'esd') {
-      promises.push(updInv(c.existingRow.id, c.newRow).then(() => { result.invoicesCount++; result.invoiceIds.push(c.documentId) }))
-    } else if (c.type === 'autocount') {
-      promises.push(updAuto(c.existingRow.id, c.newRow).then(() => { result.autocountInvoicesCount++; result.autocountInvoiceIds.push(c.documentId) }))
-    } else {
-      promises.push(updCN(c.existingRow.id, c.newRow).then(() => { result.creditNotesCount++; result.creditNoteIds.push(c.documentId) }))
-    }
+  for (const e of toInsert.creditNote) {
+    const r = await insertCreditNote(e.newRow)
+    result.creditNotesCount++
+    result.creditNoteIds.push(r.creditNoteNo)
+    recordInitialStatus({
+      entityType: 'credit_note',
+      entityId: r.id,
+      documentNo: r.creditNoteNo,
+      status: r.status || 'Billed',
+      statusAt: r.statusUpdatedAt,
+    })
   }
-  return Promise.all(promises).then(() => result)
+  return result
 }
 
 export default function ImportDocumentPage() {
   const fileInputRef = useRef(null)
   const [importResult, setImportResult] = useState(null)
-  const [conflictModal, setConflictModal] = useState(null)
-  const [partialOverwriteSelected, setPartialOverwriteSelected] = useState({})
-
-  const applyImport = async (nonConflicting, overwriteList) => {
-    const apis = {
-      insertInvoice,
-      insertAutocountInvoice,
-      insertCreditNote,
-      updateInvoice,
-      updateAutocountInvoice,
-      updateCreditNote,
-    }
-    const result = await runImport(nonConflicting, overwriteList, apis)
-    setImportResult({ success: true, ...result })
-    setConflictModal(null)
-    setPartialOverwriteSelected({})
-  }
-
-  const handleSkipAll = () => {
-    if (!conflictModal) return
-    applyImport(conflictModal.nonConflicting, [])
-  }
-
-  const handleOverwriteAll = () => {
-    if (!conflictModal) return
-    applyImport(conflictModal.nonConflicting, conflictModal.conflicts)
-  }
-
-  const handleChoosePartial = () => {
-    setConflictModal((m) => (m ? { ...m, step: 'partial' } : null))
-    const initial = {}
-    conflictModal.conflicts.forEach((_, i) => { initial[i] = false })
-    setPartialOverwriteSelected(initial)
-  }
-
-  const handlePartialBack = () => {
-    setConflictModal((m) => (m ? { ...m, step: 'choice' } : null))
-    setPartialOverwriteSelected({})
-  }
-
-  const handleOverwriteSelected = () => {
-    if (!conflictModal) return
-    const toOverwrite = conflictModal.conflicts.filter((_, i) => partialOverwriteSelected[i])
-    applyImport(conflictModal.nonConflicting, toOverwrite)
-  }
+  const [importing, setImporting] = useState(false)
 
   const handleDocumentImport = async (e) => {
     const file = e.target.files?.[0]
-    if (!file) return
+    if (!file || importing) return
+    setImporting(true)
     setImportResult(null)
-    setConflictModal(null)
-    const fileName = file.name.toLowerCase()
-    const isExcel = /\.(xlsx|xls)$/.test(fileName)
-    const isCsv = /\.csv$/.test(fileName)
-    if (!isExcel && !isCsv) {
-      setImportResult({ error: 'Please choose an Excel (.xlsx, .xls) or CSV file.' })
-      e.target.value = ''
-      return
-    }
     try {
+      const fileName = file.name.toLowerCase()
+      const isExcel = /\.(xlsx|xls)$/.test(fileName)
+      const isCsv = /\.csv$/.test(fileName)
+      if (!isExcel && !isCsv) {
+        setImportResult({ error: 'Please choose an Excel (.xlsx, .xls) or CSV file.' })
+        return
+      }
       const rows = await parseFileToRows(file)
       if (!rows.length) {
         setImportResult({ error: 'File is empty or could not be read.' })
-        e.target.value = ''
         return
       }
       const headers = rows[0].map((h) => (h != null ? String(h) : ''))
-      const docIdCol = findDocumentIdColumnIndex(headers)
+      const docIdCol = findDocumentNumberColumnIndex(headers)
       if (docIdCol === -1) {
         setImportResult({
-          error: 'No "Document ID" column found. Your file should have a column named "Document ID" (or "DocumentID").',
+          error: 'No document number column found. Your file needs "Document ID" (or "DocumentID") or "DocNo" (or "Doc No").',
         })
-        e.target.value = ''
         return
       }
+      const docTypeCol = findDocTypeColumnIndex(headers)
       const importDate = getTodayDateStr()
       const [existingEsd, existingAutocount, existingCN] = await Promise.all([
         fetchInvoices(),
         fetchAutocountInvoices(),
         fetchCreditNotes(),
       ])
-      const conflicts = []
-      const nonConflicting = { esd: [], autocount: [], creditNote: [] }
+      const seenEsd = buildExistingNoSet(existingEsd, (x) => x.invoiceNo)
+      const seenAutocount = buildExistingNoSet(existingAutocount, (x) => x.invoiceNo)
+      const seenCN = buildExistingNoSet(existingCN, (x) => x.creditNoteNo)
+      const skipped = []
+      const toInsert = { esd: [], autocount: [], creditNote: [] }
       for (let r = 1; r < rows.length; r++) {
-        const cell = rows[r][docIdCol]
-        const docId = cell != null ? String(cell).trim() : ''
+        const docId = normalizeDocumentId(rows[r][docIdCol])
         if (!docId) continue
-        const upper = docId.toUpperCase()
-        if (docId.startsWith('310')) {
-          const newRow = buildInvoiceRow(docId, importDate)
-          const existing = existingAutocount.find((x) => (x.invoiceNo || '').trim() === (docId || '').trim())
-          if (existing) {
-            conflicts.push({ type: 'autocount', documentId: docId, existingRow: existing, newRow })
+        const docTypeCell = docTypeCol >= 0 ? rows[r][docTypeCol] : ''
+        const docType = classifyImportDocument(docId, docTypeCell)
+        if (docType === 'autocount') {
+          if (seenAutocount.has(docId)) {
+            skipped.push({ documentId: docId, type: 'autocount' })
           } else {
-            nonConflicting.autocount.push({ documentId: docId, newRow })
+            seenAutocount.add(docId)
+            toInsert.autocount.push({ documentId: docId, newRow: buildInvoiceRow(docId, importDate) })
           }
-        } else if (upper.startsWith('IV')) {
-          const newRow = buildInvoiceRow(docId, importDate)
-          const existing = existingEsd.find((x) => (x.invoiceNo || '').trim() === (docId || '').trim())
-          if (existing) {
-            conflicts.push({ type: 'esd', documentId: docId, existingRow: existing, newRow })
+        } else if (docType === 'esd') {
+          if (seenEsd.has(docId)) {
+            skipped.push({ documentId: docId, type: 'esd' })
           } else {
-            nonConflicting.esd.push({ documentId: docId, newRow })
+            seenEsd.add(docId)
+            toInsert.esd.push({ documentId: docId, newRow: buildInvoiceRow(docId, importDate) })
           }
-        } else if (upper.startsWith('CN')) {
-          const newRow = buildCreditNoteRow(docId, importDate)
-          const existing = existingCN.find((x) => (x.creditNoteNo || '').trim() === (docId || '').trim())
-          if (existing) {
-            conflicts.push({ type: 'creditNote', documentId: docId, existingRow: existing, newRow })
+        } else if (docType === 'creditNote') {
+          if (seenCN.has(docId)) {
+            skipped.push({ documentId: docId, type: 'creditNote' })
           } else {
-            nonConflicting.creditNote.push({ documentId: docId, newRow })
+            seenCN.add(docId)
+            toInsert.creditNote.push({ documentId: docId, newRow: buildCreditNoteRow(docId, importDate) })
           }
         }
       }
-      if (conflicts.length === 0) {
-        const apis = {
-          insertInvoice,
-          insertAutocountInvoice,
-          insertCreditNote,
-          updateInvoice: () => {},
-          updateAutocountInvoice: () => {},
-          updateCreditNote: () => {},
-        }
-        const result = await runImport(nonConflicting, [], apis)
-        setImportResult({ success: true, ...result })
-      } else {
-        setConflictModal({
-          step: 'choice',
-          conflicts,
-          nonConflicting,
-        })
-      }
+      const result = await runImport(toInsert)
+      setImportResult({
+        success: true,
+        skippedCount: skipped.length,
+        skippedIds: skipped.map((s) => s.documentId),
+        ...result,
+      })
     } catch (err) {
       setImportResult({
         error: err.message || 'Failed to parse file. Please check the file format.',
       })
+    } finally {
+      setImporting(false)
+      e.target.value = ''
     }
-    e.target.value = ''
   }
 
   return (
@@ -273,7 +303,7 @@ export default function ImportDocumentPage() {
         <div className="px-5 py-3 border-b border-slate-200 bg-slate-50">
           <h2 className="text-lg font-semibold text-slate-800">Import Document</h2>
           <p className="text-slate-500 text-sm mt-1">
-            Upload an Excel (.xlsx, .xls) or CSV file.
+            Upload an Excel (.xlsx, .xls) or CSV file with Document ID or DocNo, optional DocType (CN). IV/T → Autocount; numbers only → ESD. Existing document numbers are skipped (not overwritten).
           </p>
         </div>
         <div className="p-5">
@@ -287,10 +317,11 @@ export default function ImportDocumentPage() {
           <button
             type="button"
             onClick={() => fileInputRef.current?.click()}
-            className="inline-flex items-center gap-2 px-4 py-2.5 bg-blue-900 text-white rounded-lg hover:bg-blue-800 transition-colors font-medium shadow"
+            disabled={importing}
+            className="inline-flex items-center gap-2 px-4 py-2.5 bg-blue-900 text-white rounded-lg hover:bg-blue-800 transition-colors font-medium shadow disabled:opacity-50"
           >
             <Upload size={18} />
-            Choose Excel or CSV file
+            {importing ? 'Importing…' : 'Choose Excel or CSV file'}
           </button>
           {importResult?.error && (
             <div className="mt-3 p-3 rounded-lg bg-red-50 border border-red-200 text-red-800 text-sm">
@@ -303,6 +334,11 @@ export default function ImportDocumentPage() {
               <p>
                 {importResult.invoicesCount} ESD invoice(s), {importResult.autocountInvoicesCount} Autocount invoice(s), and {importResult.creditNotesCount} credit note(s) added.
               </p>
+              {importResult.skippedCount > 0 && (
+                <p className="text-amber-800">
+                  {importResult.skippedCount} duplicate document(s) skipped (already in system).
+                </p>
+              )}
               {importResult.invoiceIds?.length > 0 && (
                 <p className="text-xs mt-1">ESD invoices: {importResult.invoiceIds.join(', ')}{importResult.invoicesCount > 20 ? ' …' : ''}</p>
               )}
@@ -312,106 +348,15 @@ export default function ImportDocumentPage() {
               {importResult.creditNoteIds?.length > 0 && (
                 <p className="text-xs">Credit notes: {importResult.creditNoteIds.join(', ')}{importResult.creditNotesCount > 20 ? ' …' : ''}</p>
               )}
+              {importResult.skippedIds?.length > 0 && (
+                <p className="text-xs text-amber-800">
+                  Skipped: {importResult.skippedIds.join(', ')}{importResult.skippedCount > 20 ? ' …' : ''}
+                </p>
+              )}
             </div>
           )}
         </div>
       </div>
-
-      {/* Conflict modal – choice step */}
-      {conflictModal && conflictModal.step === 'choice' && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50" onClick={() => setConflictModal(null)}>
-          <div className="bg-white rounded-lg shadow-xl max-w-md w-full p-6" onClick={(e) => e.stopPropagation()}>
-            <h3 className="text-lg font-semibold text-slate-800 mb-2">Document(s) already exist</h3>
-            <p className="text-slate-600 text-sm mb-2">
-              <strong>{conflictModal.conflicts.length}</strong> document(s) from your file already exist in the system.
-            </p>
-            <p className="text-amber-800 text-sm mb-4 bg-amber-50 border border-amber-200 rounded p-2">
-              If you overwrite, existing status progress will be reset (e.g. back to Billed). Choose how to proceed.
-            </p>
-            <div className="flex flex-col gap-2">
-              <button
-                type="button"
-                onClick={handleSkipAll}
-                className="w-full px-4 py-2.5 border border-slate-300 rounded-lg hover:bg-slate-50 text-slate-700 font-medium"
-              >
-                Skip all – only add new documents
-              </button>
-              <button
-                type="button"
-                onClick={handleOverwriteAll}
-                className="w-full px-4 py-2.5 bg-amber-600 text-white rounded-lg hover:bg-amber-700 font-medium"
-              >
-                Overwrite all – reset all {conflictModal.conflicts.length} existing
-              </button>
-              <button
-                type="button"
-                onClick={handleChoosePartial}
-                className="w-full px-4 py-2.5 bg-blue-900 text-white rounded-lg hover:bg-blue-800 font-medium"
-              >
-                Choose which to overwrite
-              </button>
-              <button
-                type="button"
-                onClick={() => setConflictModal(null)}
-                className="w-full px-4 py-2 text-slate-500 hover:bg-slate-100 rounded-lg"
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Conflict modal – partial overwrite step */}
-      {conflictModal && conflictModal.step === 'partial' && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50" onClick={handlePartialBack}>
-          <div className="bg-white rounded-lg shadow-xl max-w-lg w-full max-h-[85vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
-            <div className="p-4 border-b border-slate-200">
-              <h3 className="text-lg font-semibold text-slate-800">Choose which to overwrite</h3>
-              <p className="text-amber-800 text-sm mt-1 bg-amber-50 border border-amber-200 rounded p-2">
-                Overwriting will reset status progress for the selected document(s).
-              </p>
-            </div>
-            <ul className="overflow-y-auto p-4 flex-1 border-b border-slate-200">
-              {conflictModal.conflicts.map((c, i) => (
-                <li key={i} className="flex items-center gap-3 py-2 border-b border-slate-100 last:border-0">
-                  <input
-                    type="checkbox"
-                    id={`conflict-${i}`}
-                    checked={!!partialOverwriteSelected[i]}
-                    onChange={(e) => setPartialOverwriteSelected((prev) => ({ ...prev, [i]: e.target.checked }))}
-                    className="rounded border-slate-300 text-blue-900 focus:ring-blue-900"
-                  />
-                  <label htmlFor={`conflict-${i}`} className="flex-1 cursor-pointer text-sm">
-                    <span className="font-medium text-slate-800">{c.documentId}</span>
-                    <span className="text-slate-500 ml-2">
-                      ({c.type === 'esd' ? 'ESD Invoice' : c.type === 'autocount' ? 'Autocount Invoice' : 'Credit Note'}
-                      {c.existingRow.status ? ` – current: ${c.existingRow.status}` : ''})
-                    </span>
-                  </label>
-                </li>
-              ))}
-            </ul>
-            <div className="p-4 flex gap-2 justify-end">
-              <button
-                type="button"
-                onClick={handlePartialBack}
-                className="px-4 py-2 border border-slate-300 rounded-lg hover:bg-slate-50 text-slate-700"
-              >
-                Back
-              </button>
-              <button
-                type="button"
-                onClick={handleOverwriteSelected}
-                disabled={!Object.values(partialOverwriteSelected).some(Boolean)}
-                className="px-4 py-2 bg-blue-900 text-white rounded-lg hover:bg-blue-800 disabled:opacity-50 disabled:cursor-not-allowed font-medium"
-              >
-                Overwrite selected
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   )
 }

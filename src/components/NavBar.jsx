@@ -7,15 +7,18 @@ const eTrackingItems = [
   { label: 'Autocount Invoice Tracking', path: '/etracking/autocount-invoice' },
   { label: 'Credit Note Tracking', path: '/etracking/credit-note' },
   { label: 'Delivery Order Tracking', path: '/etracking/delivery-order' },
-  { label: 'GRN Tracking', path: '/etracking/grn' },
+  { label: 'IDT Tracking', path: '/etracking/idt' },
+  {
+    label: 'Goods Return Tracking',
+    children: [
+      { label: 'GRN', path: '/etracking/grn' },
+      { label: 'GRC', path: '/etracking/grc' },
+    ],
+  },
 ]
 
 const reportItems = [
-  { label: 'ESD Invoice Report', path: '/report/esd-invoice' },
-  { label: 'AC Invoice Report', path: null },
-  { label: 'Credit Note Report', path: null },
-  { label: 'Delivery Order Report', path: null },
-  { label: 'GRN Report', path: null },
+  { label: 'Lead Time Aging Report', path: '/report/lead-time-aging' },
 ]
 
 const maintenanceItemsBase = [
@@ -31,6 +34,7 @@ export default function NavBar() {
   const { isSuperuser } = useAuth()
   const maintenanceItems = [
     ...(isSuperuser ? [{ label: 'Account Management', path: '/maintenance/account-management' }] : []),
+    ...(isSuperuser ? [{ label: 'Alert Setting', path: '/maintenance/alert-setting' }] : []),
     ...maintenanceItemsBase,
   ]
 
@@ -78,7 +82,28 @@ export default function NavBar() {
           </button>
           <ul className="absolute left-0 top-full min-w-[220px] bg-slate-700 shadow-lg opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-150 z-10 py-1">
             {eTrackingItems.map((item) =>
-              item.path ? (
+              item.children ? (
+                <li key={item.label} className="group/sub relative">
+                  <span className="flex items-center justify-between gap-3 px-5 py-2.5 hover:bg-slate-600 text-sm text-white cursor-default">
+                    {item.label}
+                    <ChevronDown size={14} className="opacity-80 -rotate-90 shrink-0" />
+                  </span>
+                  <ul className="absolute left-full top-0 min-w-[160px] bg-slate-700 shadow-lg opacity-0 invisible group-hover/sub:opacity-100 group-hover/sub:visible transition-all duration-150 z-20 py-1">
+                    {item.children.map((child) => (
+                      <li key={child.label}>
+                        <Link
+                          to={child.path}
+                          className={`block px-5 py-2.5 hover:bg-slate-600 text-sm ${
+                            location.pathname === child.path ? 'bg-slate-600' : ''
+                          }`}
+                        >
+                          {child.label}
+                        </Link>
+                      </li>
+                    ))}
+                  </ul>
+                </li>
+              ) : item.path ? (
                 <li key={item.label}>
                   <Link
                     to={item.path}

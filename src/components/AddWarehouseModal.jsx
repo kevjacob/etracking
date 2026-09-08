@@ -7,6 +7,7 @@ export default function AddWarehouseModal({ isOpen, onClose, onSaved, warehouse 
   const [warehouseName, setWarehouseName] = useState('')
   const [picName, setPicName] = useState('')
   const [picPhone, setPicPhone] = useState('')
+  const [own, setOwn] = useState(true)
   const isEdit = !!warehouse
 
   useEffect(() => {
@@ -15,10 +16,12 @@ export default function AddWarehouseModal({ isOpen, onClose, onSaved, warehouse 
         setWarehouseName(warehouse.name || '')
         setPicName(warehouse.picName || '')
         setPicPhone(warehouse.picPhone || '')
+        setOwn(warehouse.own !== false)
       } else {
         setWarehouseName('')
         setPicName('')
         setPicPhone('')
+        setOwn(true)
       }
     }
   }, [isOpen, warehouse])
@@ -27,18 +30,21 @@ export default function AddWarehouseModal({ isOpen, onClose, onSaved, warehouse 
     e.preventDefault()
     if (!warehouseName.trim()) return
     try {
+      const payload = {
+        name: warehouseName.trim(),
+        picName: picName.trim(),
+        picPhone: picPhone.trim(),
+        own,
+      }
       if (isEdit) {
-        await updateWarehouse(warehouse.id, {
-          name: warehouseName.trim(),
-          picName: picName.trim(),
-          picPhone: picPhone.trim(),
-        })
+        await updateWarehouse(warehouse.id, payload)
       } else {
-        await addWarehouse(warehouseName.trim(), picName.trim())
+        await addWarehouse(payload)
       }
       setWarehouseName('')
       setPicName('')
       setPicPhone('')
+      setOwn(true)
       onSaved?.()
       onClose()
     } catch (err) {
@@ -50,6 +56,7 @@ export default function AddWarehouseModal({ isOpen, onClose, onSaved, warehouse 
     setWarehouseName('')
     setPicName('')
     setPicPhone('')
+    setOwn(true)
     onClose()
   }
 
@@ -97,6 +104,20 @@ export default function AddWarehouseModal({ isOpen, onClose, onSaved, warehouse 
               className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-900 focus:border-blue-900"
               placeholder="Contact number"
             />
+          </div>
+          <div>
+            <label className="flex items-center gap-2 text-sm font-medium text-slate-700 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={own}
+                onChange={(e) => setOwn(e.target.checked)}
+                className="rounded border-slate-300 text-blue-900 focus:ring-blue-900"
+              />
+              Own
+            </label>
+            <p className="text-xs text-slate-500 mt-1">
+              Own warehouses appear in Hold-Warehouse and Chop &amp; Sign - Warehouse lists. Untick for distributor warehouses.
+            </p>
           </div>
           <div className="flex justify-end gap-2 pt-2">
             <button type="button" onClick={handleClose} className="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg">Cancel</button>

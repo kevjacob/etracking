@@ -42,6 +42,11 @@ export default function WarehouseMaintenancePage() {
                 <Warehouse size={18} className="text-slate-400 shrink-0" />
                 <div className="min-w-0 flex-1">
                   <span className="font-medium text-slate-800">{w.name}</span>
+                  {w.own !== false && (
+                    <span className="ml-2 text-xs font-medium text-blue-900 bg-blue-50 border border-blue-100 rounded px-1.5 py-0.5">
+                      Own
+                    </span>
+                  )}
                   {w.picName && <span className="text-slate-500 text-sm ml-2">PIC: {w.picName}</span>}
                 </div>
                 <button

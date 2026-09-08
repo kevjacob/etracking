@@ -29,6 +29,32 @@ function saveGRNs(rows) {
   }
 }
 
+const defaultDiscrepancy = () => ({ checked: false, title: '', description: '' })
+
+export function createGRNRow(overrides = {}) {
+  return {
+    id: String(Date.now() + Math.random()),
+    grnNo: '',
+    grnDate: '',
+    numberAndDateLocked: false,
+    status: 'Billed',
+    statusUpdatedAt: new Date().toISOString(),
+    assignedDriverId: null,
+    assignedSalesmanId: null,
+    assignedClerkId: null,
+    transferWarehouseId: null,
+    holdWarehouseId: null,
+    holdWarehouseType: '',
+    deliveryDate: '',
+    deliverySlot: '',
+    remark: '',
+    remarkAtBilled: '',
+    discrepancy: defaultDiscrepancy(),
+    linkedGrcId: null,
+    ...overrides,
+  }
+}
+
 export async function fetchGRNs() {
   if (isSupabaseConfigured()) {
     const { data, error } = await supabase.from('grn').select('*').order('created_at', { ascending: true })
@@ -40,7 +66,7 @@ export async function fetchGRNs() {
 
 export async function insertGRN(row) {
   if (isSupabaseConfigured()) {
-    const { id, ...rest } = row
+    const { id, linkedGrcId, linkedGrnId, ...rest } = row
     const payload = toSnakeCase(rest)
     const { data, error } = await supabase.from('grn').insert(payload).select('*').single()
     if (error) throw error
@@ -56,7 +82,8 @@ export async function insertGRN(row) {
 
 export async function updateGRN(id, row) {
   if (isSupabaseConfigured()) {
-    const payload = toSnakeCase({ ...row, id })
+    const { linkedGrcId, linkedGrnId, ...rest } = row
+    const payload = toSnakeCase({ ...rest, id })
     const { data, error } = await supabase.from('grn').update(payload).eq('id', id).select('*').single()
     if (error) throw error
     return fromSnakeCase(data)

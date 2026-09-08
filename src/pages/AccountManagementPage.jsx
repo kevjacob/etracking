@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 import { supabase, isSupabaseConfigured } from '../supabaseClient'
 import { validatePassword, getPasswordHint } from '../utils/passwordRules'
+import NoticeModal from '../components/NoticeModal'
 
 const PASSWORD_MAX_LENGTH = 64
 import { Pencil, Trash2, X } from 'lucide-react'
@@ -37,6 +38,7 @@ export default function AccountManagementPage() {
 
   const [deleteUser, setDeleteUser] = useState(null)
   const [deleteLoading, setDeleteLoading] = useState(false)
+  const [successNotice, setSuccessNotice] = useState({ open: false, message: '' })
 
 const loadUsers = useCallback(async () => {
     if (!isSupabaseConfigured() || !user?.username) return
@@ -175,8 +177,16 @@ const loadUsers = useCallback(async () => {
         })
         if (pwError) throw pwError
       }
+      const passwordChanged = !!editNewPassword
       setEditUser(null)
+      setEditNewPassword('')
       loadUsers()
+      setSuccessNotice({
+        open: true,
+        message: passwordChanged
+          ? 'Password has been changed successfully.'
+          : 'Account successfully updated.',
+      })
     } catch (err) {
       setEditError(err.message || 'Failed to update account.')
     } finally {
@@ -480,6 +490,11 @@ const loadUsers = useCallback(async () => {
           </div>
         </div>
       )}
+      <NoticeModal
+        isOpen={successNotice.open}
+        message={successNotice.message}
+        onClose={() => setSuccessNotice({ open: false, message: '' })}
+      />
     </div>
   )
 }

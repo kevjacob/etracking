@@ -40,7 +40,7 @@ export async function fetchInvoices() {
 
 export async function insertInvoice(row) {
   if (isSupabaseConfigured()) {
-    const { id, ...rest } = row
+    const { id, cod, ...rest } = row
     const payload = toSnakeCase(rest)
     const { data, error } = await supabase.from('invoices_autocount').insert(payload).select('*').single()
     if (error) throw error

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { Trash2, Plus, Pencil } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
@@ -9,14 +9,26 @@ import { formatDate, toInputDate, parseDate } from '../utils/dateFormat'
 import { sortBySerial } from '../utils/serialSort'
 import { fetchCreditNotes, insertCreditNote, updateCreditNote, deleteCreditNote } from '../api/creditNotes'
 import DeliverySlotModal from '../components/DeliverySlotModal'
-import DiscrepancyModal from '../components/DiscrepancyModal'
+import AdditionalRemarkModal from '../components/AdditionalRemarkModal'
+import AdditionalRemarkCell from '../components/AdditionalRemarkCell'
 import SelectSalesmanModal from '../components/SelectSalesmanModal'
 import SelectClerkModal from '../components/SelectClerkModal'
 import SelectWarehouseModal from '../components/SelectWarehouseModal'
 import HoldWarehouseTypeModal from '../components/HoldWarehouseTypeModal'
+import RemoveSelfCollectModal from '../components/RemoveSelfCollectModal'
 import SelectDriverModal from '../components/SelectDriverModal'
+import AssignedToCell from '../components/AssignedToCell'
+import ReassignAssigneeModal, { reassignAssigneeUpdates } from '../components/ReassignAssigneeModal'
+import ReassignAssignedDateModal, { reassignDateUpdates } from '../components/ReassignAssignedDateModal'
 import NoticeModal from '../components/NoticeModal'
+import RefreshListButton from '../components/RefreshListButton'
+import TrackingMonthFilter from '../components/TrackingMonthFilter'
+import TrackingPagination from '../components/TrackingPagination'
 import { useRealtimeTable } from '../hooks/useRealtimeTable'
+import { useTrackingListView } from '../hooks/useTrackingListView'
+import { formatMonthLabel } from '../utils/trackingListFilters'
+import { appendChopSignToRemark, hasSelfCollectInRemark, leavingChopSignRemarkPayload } from '../utils/remarkUtils'
+import { recordStatusTransition, recordInitialStatus } from '../utils/recordStatusTransition'
 
 function getTodayDateStr() {
   const d = new Date()
@@ -67,6 +79,7 @@ const PHASE_2 = [
 const PHASE_3 = ['Delivery In Progress']
 const PHASE_4 = ['Delivered']
 const PHASE_5 = ['Completed', 'Cancelled']
+const STATUS_SHOWS_DELIVERY_ASSIGNEE = ['Delivery In Progress', 'Delivered', 'Completed']
 
 function getPhase(status) {
   if (PHASE_1.includes(status)) return 1
@@ -81,7 +94,11 @@ const DELIVERED_VALIDATION_MSG = 'Assigned person and date is missing, please go
 const DELIVERY_IN_PROGRESS_VALIDATION_MSG = 'Driver and Delivery date yet to be assigned.'
 const PHASE_4_LOCKED_MSG = 'This Status can no longer be changed as the order has been completed.'
 
-const defaultDiscrepancy = () => ({ checked: false, title: '', description: '' })
+import { defaultAdditionalRemark, getAdditionalRemarkText, saveAdditionalRemark } from '../utils/additionalRemark'
+
+function emptyAddCreditNoteRow() {
+  return { creditNoteNo: '', creditNoteDate: '', additionalRemark: '' }
+}
 
 function createCreditNote(overrides = {}) {
   return {
@@ -100,7 +117,7 @@ function createCreditNote(overrides = {}) {
     deliverySlot: '',
     remark: '',
     remarkAtBilled: '', // kept when backtracking from Phase 2 to Billed
-    discrepancy: defaultDiscrepancy(),
+    discrepancy: defaultAdditionalRemark(),
     ...overrides,
   }
 }
@@ -117,7 +134,7 @@ export default function CreditNoteTrackingPage() {
   const [creditNotesLoading, setCreditNotesLoading] = useState(true)
   const [addCreditNoteFormOpen, setAddCreditNoteFormOpen] = useState(false)
   const [addCreditNoteMultiple, setAddCreditNoteMultiple] = useState(false)
-  const [addCreditNoteRows, setAddCreditNoteRows] = useState([{ creditNoteNo: '', creditNoteDate: '' }])
+  const [addCreditNoteRows, setAddCreditNoteRows] = useState([emptyAddCreditNoteRow()])
   const [addCreditNoteApplyDateToAll, setAddCreditNoteApplyDateToAll] = useState(false)
   const [addCreditNoteConfirmOpen, setAddCreditNoteConfirmOpen] = useState(false)
   const [overwriteCreditNoteModal, setOverwriteCreditNoteModal] = useState({
@@ -127,15 +144,22 @@ export default function CreditNoteTrackingPage() {
     index: 0,
   })
   const [deliveryModal, setDeliveryModal] = useState({ open: false, rowId: null, dateLabel: '' })
-  const [discrepancyModal, setDiscrepancyModal] = useState({
+  const [additionalRemarkModal, setAdditionalRemarkModal] = useState({
     open: false,
     rowId: null,
-    title: '',
-    description: '',
+    remark: '',
   })
   const [datePickerRow, setDatePickerRow] = useState(null)
   const [creditNoteDatePickerRow, setCreditNoteDatePickerRow] = useState(null)
   const [salesmanModal, setSalesmanModal] = useState({ open: false, rowId: null, previousStatus: '' })
+  const [reassignModal, setReassignModal] = useState({ open: false, rowId: null, currentName: '' })
+  const [reassignDateModal, setReassignDateModal] = useState({
+    open: false,
+    rowId: null,
+    currentLabel: '',
+    initialDate: '',
+    initialSlot: '',
+  })
   const [clerkModal, setClerkModal] = useState({ open: false, rowId: null, previousStatus: '' })
   const [warehouseModal, setWarehouseModal] = useState({ open: false, rowId: null, previousStatus: '' })
   const [holdWarehouseModal, setHoldWarehouseModal] = useState({ open: false, rowId: null, previousStatus: '' })
@@ -181,6 +205,10 @@ export default function CreditNoteTrackingPage() {
     rowId: null,
     previousStatus: '',
   })
+  const [removeSelfCollectModal, setRemoveSelfCollectModal] = useState({
+    open: false,
+    pending: null,
+  })
   const [phase4LockedNoticeOpen, setPhase4LockedNoticeOpen] = useState(false)
   const [backtrackPhase2To1Modal, setBacktrackPhase2To1Modal] = useState({ open: false, rowId: null })
   const [backtrackPhase3To1Modal, setBacktrackPhase3To1Modal] = useState({ open: false, rowId: null })
@@ -204,15 +232,27 @@ export default function CreditNoteTrackingPage() {
     onApplied: null,
   })
   const [creditNoteSearchQuery, setCreditNoteSearchQuery] = useState('')
-  const filteredCreditNotes = useMemo(() => {
-    const q = (creditNoteSearchQuery || '').trim().toLowerCase()
-    const list = !q
-      ? creditNotes
-      : creditNotes.filter((row) =>
-          (row.creditNoteNo || '').toLowerCase().includes(q)
-        )
-    return sortBySerial(list, (row) => row.creditNoteNo)
-  }, [creditNotes, creditNoteSearchQuery])
+  const getCreditNoteDate = useCallback((row) => row.creditNoteDate, [])
+  const getCreditNoteSearch = useCallback((row) => row.creditNoteNo, [])
+  const sortCreditNotes = useCallback((list) => sortBySerial(list, (row) => row.creditNoteNo), [])
+  const {
+    availableMonths,
+    selectedMonth,
+    setSelectedMonth,
+    filteredRows: filteredCreditNotes,
+    pageRows: pagedCreditNotes,
+    currentPage,
+    totalPages,
+    totalItems: filteredCreditNoteCount,
+    goToPage,
+  } = useTrackingListView({
+    pageKey: 'credit-notes',
+    rows: creditNotes,
+    searchQuery: creditNoteSearchQuery,
+    getDateField: getCreditNoteDate,
+    getSearchField: getCreditNoteSearch,
+    sortRows: sortCreditNotes,
+  })
   const assignDatePendingRef = useRef({
     rowId: null,
     fromDriver: false,
@@ -240,8 +280,19 @@ export default function CreditNoteTrackingPage() {
   useRealtimeTable('credit_notes', setCreditNotes)
 
   const updateRow = (id, updates) => {
+    const withTimestamp =
+      updates.status !== undefined
+        ? { ...updates, statusUpdatedAt: new Date().toISOString() }
+        : updates
     setCreditNotes((prev) => {
-      const next = prev.map((row) => (row.id === id ? { ...row, ...updates } : row))
+      const prevRow = prev.find((r) => r.id === id)
+      if (updates.status !== undefined && prevRow && updates.status !== prevRow.status) {
+        recordStatusTransition(prevRow, updates.status, {
+          entityType: 'credit_note',
+          getDocumentNo: (r) => r.creditNoteNo,
+        })
+      }
+      const next = prev.map((row) => (row.id === id ? { ...row, ...withTimestamp } : row))
       const row = next.find((r) => r.id === id)
       if (!row) return next
       updateCreditNote(id, row)
@@ -339,31 +390,22 @@ export default function CreditNoteTrackingPage() {
     )
   }
 
-  const handleDiscrepancyCheck = (rowId, checked) => {
-    if (checked) {
-      const row = creditNotes.find((r) => r.id === rowId)
-      updateRow(rowId, { discrepancy: { ...row.discrepancy, checked: true } })
-      setDiscrepancyModal({
-        open: true,
-        rowId,
-        title: row?.discrepancy?.title || '',
-        description: row?.discrepancy?.description || '',
-      })
-    } else {
-      updateRow(rowId, { discrepancy: defaultDiscrepancy() })
-    }
+  const closeAdditionalRemarkModal = () => {
+    setAdditionalRemarkModal({ open: false, rowId: null, remark: '' })
   }
 
-  const handleDiscrepancySave = (rowId, { title, description }) => {
-    updateRow(rowId, {
-      discrepancy: { checked: true, title, description },
+  const handleAdditionalRemarkOpen = (rowId) => {
+    const row = creditNotes.find((r) => r.id === rowId)
+    setAdditionalRemarkModal({
+      open: true,
+      rowId,
+      remark: getAdditionalRemarkText(row?.discrepancy),
     })
-    setDiscrepancyModal({ open: false, rowId: null, title: '', description: '' })
   }
 
-  const handleDiscrepancyCancel = (rowId) => {
-    updateRow(rowId, { discrepancy: defaultDiscrepancy() })
-    setDiscrepancyModal({ open: false, rowId: null, title: '', description: '' })
+  const handleAdditionalRemarkSave = (rowId, remark) => {
+    updateRow(rowId, { discrepancy: saveAdditionalRemark(remark) })
+    closeAdditionalRemarkModal()
   }
 
   const handleStatusChange = (rowId, newStatus, previousStatus) => {
@@ -446,29 +488,35 @@ export default function CreditNoteTrackingPage() {
       newStatus.startsWith('Hold -') || newStatus.startsWith('Chop & Sign -')
     const fromBilledToPhase2 = row.status === 'Billed' && newPhase === 2
     const remarkAtBilledUpdate = fromBilledToPhase2 ? { remarkAtBilled: row.remark ?? '' } : {}
+    const chopSignRemarkUpdate = leavingChopSignRemarkPayload(row.status, newStatus, row.remark)
     if (newStatus === 'Delivery In Progress') {
       updateRow(rowId, {
         status: newStatus,
         assignedSalesmanId: null,
         assignedDriverId: null,
         ...remarkAtBilledUpdate,
+        ...chopSignRemarkUpdate,
       })
       setPreparingDeliveryTypeModal({ open: true, rowId, previousStatus })
     } else if (STATUS_REQUIRES_SALESMAN.includes(newStatus)) {
-      updateRow(rowId, { status: newStatus, assignedDriverId: null, ...remarkAtBilledUpdate })
+      updateRow(rowId, { status: newStatus, assignedDriverId: null, ...remarkAtBilledUpdate, ...chopSignRemarkUpdate })
       setSalesmanModal({ open: true, rowId, previousStatus })
     } else if (STATUS_REQUIRES_CLERK.includes(newStatus)) {
-      updateRow(rowId, { status: newStatus, assignedDriverId: null, ...remarkAtBilledUpdate })
+      updateRow(rowId, { status: newStatus, assignedDriverId: null, ...remarkAtBilledUpdate, ...chopSignRemarkUpdate })
       setClerkModal({ open: true, rowId, previousStatus })
     } else if (newStatus === STATUS_TRANSFER) {
-      updateRow(rowId, { status: newStatus, ...remarkAtBilledUpdate })
+      updateRow(rowId, { status: newStatus, ...remarkAtBilledUpdate, ...chopSignRemarkUpdate })
       setWarehouseModal({ open: true, rowId, previousStatus })
     } else if (newStatus === 'Hold - Warehouse') {
-      updateRow(rowId, { status: newStatus, assignedDriverId: null, ...remarkAtBilledUpdate })
+      updateRow(rowId, { status: newStatus, assignedDriverId: null, ...remarkAtBilledUpdate, ...chopSignRemarkUpdate })
       setHoldWarehouseModal({ open: true, rowId, previousStatus })
     } else if (newStatus === 'Chop & Sign - Warehouse') {
       setChopSignWarehouseConfirmModal({ open: true, rowId, previousStatus })
       return
+    } else if (newStatus === 'Delivered') {
+      const payload = { status: newStatus, ...remarkAtBilledUpdate, ...chopSignRemarkUpdate }
+      updateRow(rowId, payload)
+      afterBulkableCommit(rowId, payload, () => {})
     } else {
       const payload = {
         status: newStatus,
@@ -477,6 +525,7 @@ export default function CreditNoteTrackingPage() {
         transferWarehouseId: null,
         ...(clearDriverForHoldOrChop ? { assignedDriverId: null } : {}),
         ...remarkAtBilledUpdate,
+        ...chopSignRemarkUpdate,
       }
       updateRow(rowId, payload)
       afterBulkableCommit(rowId, payload, () => {})
@@ -505,7 +554,7 @@ export default function CreditNoteTrackingPage() {
     updateRow(rowId, { assignedClerkId: clerkId })
     setClerkModal({ open: false, rowId: null, previousStatus: '' })
     const row = creditNotes.find((r) => r.id === rowId)
-    assignDatePendingRef.current = { rowId, fromDriver: false }
+    assignDatePendingRef.current = { rowId, fromDriver: false, clerkId }
     setAssignDateModal({
       open: true,
       rowId,
@@ -600,9 +649,8 @@ export default function CreditNoteTrackingPage() {
       remark: newRemark,
     }
     updateRow(rowId, payload)
-    afterBulkableCommit(rowId, payload, () =>
-      setHoldWarehouseTypeModal({ open: false, rowId: null, warehouseId: null, warehouseName: '', previousStatus: '' })
-    )
+    setHoldWarehouseTypeModal({ open: false, rowId: null, warehouseId: null, warehouseName: '', previousStatus: '' })
+    afterBulkableCommit(rowId, payload, () => {})
   }
 
   const handleHoldWarehouseTypeCancel = () => {
@@ -729,7 +777,12 @@ export default function CreditNoteTrackingPage() {
       holdWarehouseId: null,
       holdWarehouseType: '',
     }
-    const payload = { status: newStatus, ...resetPhase3Fields }
+    const row = creditNotes.find((r) => r.id === rowId)
+    const payload = {
+      status: newStatus,
+      ...resetPhase3Fields,
+      ...leavingChopSignRemarkPayload(previousStatus, newStatus, row?.remark),
+    }
     updateRow(rowId, payload)
     afterBulkableCommit(rowId, payload, () => {
       setPhase3ToOtherPhase2Modal({ open: false, rowId: null, newStatus: '', previousStatus: '' })
@@ -801,7 +854,11 @@ export default function CreditNoteTrackingPage() {
 
   const handleCompletedConfirmYes = () => {
     const { rowId } = completedConfirmModal
-    const payload = { status: 'Completed' }
+    const row = creditNotes.find((r) => r.id === rowId)
+    const payload = {
+      status: 'Completed',
+      ...leavingChopSignRemarkPayload(row?.status, 'Completed', row?.remark),
+    }
     if (rowId) updateRow(rowId, payload)
     afterBulkableCommit(rowId, payload, () => setCompletedConfirmModal({ open: false, rowId: null }))
   }
@@ -834,13 +891,73 @@ export default function CreditNoteTrackingPage() {
     setDriverModal({ open: true, rowId, previousStatus, fromChopSignWarehouse: true })
   }
 
+  const applyChopSignRemarkUpdate = (pending, removeSelfCollect) => {
+    const { rowIdToUse, dateToSave, fromChopSignNoFlow, fromChopSignWarehouse } = pending
+    const row = creditNotes.find((r) => r.id === rowIdToUse)
+    const newRemark = appendChopSignToRemark(row?.remark, { removeSelfCollect })
+    if (fromChopSignNoFlow) {
+      const { warehouseId } = fromChopSignNoFlow
+      const payload = {
+        status: 'Hold - Warehouse',
+        holdWarehouseId: warehouseId,
+        holdWarehouseType: removeSelfCollect ? '' : row?.holdWarehouseType ?? '',
+        assignedDriverId: null,
+        deliveryDate: dateToSave,
+        deliverySlot: '',
+        remark: newRemark,
+      }
+      updateRow(rowIdToUse, payload)
+      afterBulkableCommit(rowIdToUse, payload, () => {})
+    } else if (fromChopSignWarehouse) {
+      const payload = {
+        status: 'Delivery In Progress',
+        deliveryDate: dateToSave,
+        deliverySlot: '',
+        remark: newRemark,
+        ...(removeSelfCollect ? { holdWarehouseType: '' } : {}),
+      }
+      updateRow(rowIdToUse, payload)
+      afterBulkableCommit(rowIdToUse, payload, () => {})
+    }
+  }
+
+  const handleRemoveSelfCollectYes = () => {
+    const { pending } = removeSelfCollectModal
+    if (pending) applyChopSignRemarkUpdate(pending, true)
+    setRemoveSelfCollectModal({ open: false, pending: null })
+  }
+
+  const handleRemoveSelfCollectNo = () => {
+    const { pending } = removeSelfCollectModal
+    if (pending) applyChopSignRemarkUpdate(pending, false)
+    setRemoveSelfCollectModal({ open: false, pending: null })
+  }
+
   const handleAssignDateConfirm = () => {
     const ref = assignDatePendingRef.current
-    const { rowId: refRowId, fromDriver, fromChopSignWarehouse, fromChopSignNoFlow } = ref
+    const { rowId: refRowId, fromDriver, fromChopSignWarehouse, fromChopSignNoFlow, clerkId } = ref
     const rowIdToUse = refRowId ?? assignDateModal.rowId
     const dateStr = assignDateModal.selectedDate || getTodayDateStr()
     const parsed = parseDate(dateStr)
     const dateToSave = parsed || getTodayDateStr()
+
+    if (rowIdToUse && (fromChopSignNoFlow || fromChopSignWarehouse)) {
+      const row = creditNotes.find((r) => r.id === rowIdToUse)
+      if (hasSelfCollectInRemark(row?.remark)) {
+        setRemoveSelfCollectModal({
+          open: true,
+          pending: { rowIdToUse, dateToSave, fromChopSignNoFlow, fromChopSignWarehouse },
+        })
+        assignDatePendingRef.current = {
+          rowId: null,
+          fromDriver: false,
+          fromChopSignWarehouse: false,
+          fromChopSignNoFlow: null,
+        }
+        setAssignDateModal({ open: false, rowId: null, selectedDate: '', fromDriver: false })
+        return
+      }
+    }
 
     assignDatePendingRef.current = {
       rowId: null,
@@ -852,36 +969,11 @@ export default function CreditNoteTrackingPage() {
 
     try {
       if (rowIdToUse) {
-        if (fromChopSignNoFlow) {
-          const { warehouseId } = fromChopSignNoFlow
-          const row = creditNotes.find((r) => r.id === rowIdToUse)
-          const currentRemark = row?.remark?.trim() || ''
-          const newRemark = currentRemark ? `${currentRemark} / Chop & Sign` : 'Chop & Sign'
-          const payload = {
-            status: 'Hold - Warehouse',
-            holdWarehouseId: warehouseId,
-            holdWarehouseType: '',
-            assignedDriverId: null,
-            deliveryDate: dateToSave,
-            deliverySlot: '',
-            remark: newRemark,
-          }
-          updateRow(rowIdToUse, payload)
-          afterBulkableCommit(rowIdToUse, payload, () => {})
-          return
-        }
-        if (fromChopSignWarehouse) {
-          const row = creditNotes.find((r) => r.id === rowIdToUse)
-          const currentRemark = row?.remark?.trim() || ''
-          const newRemark = currentRemark ? `${currentRemark} / Chop & Sign` : 'Chop & Sign'
-          const payload = {
-            status: 'Delivery In Progress',
-            deliveryDate: dateToSave,
-            deliverySlot: '',
-            remark: newRemark,
-          }
-          updateRow(rowIdToUse, payload)
-          afterBulkableCommit(rowIdToUse, payload, () => {})
+        if (fromChopSignNoFlow || fromChopSignWarehouse) {
+          applyChopSignRemarkUpdate(
+            { rowIdToUse, dateToSave, fromChopSignNoFlow, fromChopSignWarehouse },
+            false
+          )
           return
         }
         updateRow(rowIdToUse, { deliveryDate: dateToSave, deliverySlot: '' })
@@ -889,10 +981,12 @@ export default function CreditNoteTrackingPage() {
           setDeliveryModal({ open: true, rowId: rowIdToUse, dateLabel: formatDate(dateToSave) })
         } else {
           const leadRow = creditNotes.find((r) => r.id === rowIdToUse)
+          const assignedClerkId = clerkId ?? leadRow?.assignedClerkId ?? null
           const payload = leadRow
             ? {
                 status: leadRow.status,
                 assignedSalesmanId: leadRow.assignedSalesmanId,
+                assignedClerkId,
                 assignedDriverId: leadRow.assignedDriverId,
                 deliveryDate: dateToSave,
                 deliverySlot: '',
@@ -961,11 +1055,11 @@ export default function CreditNoteTrackingPage() {
   const handleAddCreditNoteMultipleToggle = (on) => {
     setAddCreditNoteMultiple(on)
     if (on) {
-      const newRows = Array(10).fill(null).map(() => ({ creditNoteNo: '', creditNoteDate: '' }))
+      const newRows = Array(10).fill(null).map(() => emptyAddCreditNoteRow())
       setAddCreditNoteRows(newRows)
       setAddCreditNoteApplyDateToAll(false)
     } else {
-      const first = addCreditNoteRows[0] ? { ...addCreditNoteRows[0] } : { creditNoteNo: '', creditNoteDate: '' }
+      const first = addCreditNoteRows[0] ? { ...addCreditNoteRows[0] } : emptyAddCreditNoteRow()
       setAddCreditNoteRows([first])
       setAddCreditNoteApplyDateToAll(false)
     }
@@ -987,6 +1081,7 @@ export default function CreditNoteTrackingPage() {
       .map((r, i) => ({
         creditNoteNo: r.creditNoteNo?.trim(),
         creditNoteDate: addCreditNoteApplyDateToAll ? firstDate : (r.creditNoteDate || ''),
+        additionalRemark: (r.additionalRemark || '').trim(),
       }))
       .filter((e) => e.creditNoteNo)
   }
@@ -1016,13 +1111,24 @@ export default function CreditNoteTrackingPage() {
       return
     }
     for (const e of nonConflicting) {
-      const newRow = createCreditNote({ creditNoteNo: e.creditNoteNo, creditNoteDate: e.creditNoteDate })
+      const newRow = createCreditNote({
+        creditNoteNo: e.creditNoteNo,
+        creditNoteDate: e.creditNoteDate,
+        discrepancy: saveAdditionalRemark(e.additionalRemark),
+      })
       const inserted = await insertCreditNote(newRow)
+      recordInitialStatus({
+        entityType: 'credit_note',
+        entityId: inserted.id,
+        documentNo: inserted.creditNoteNo,
+        status: inserted.status || 'Billed',
+        statusAt: inserted.statusUpdatedAt,
+      })
       setCreditNotes((prev) => [...prev, inserted])
     }
     setAddCreditNoteFormOpen(false)
     setAddCreditNoteConfirmOpen(false)
-    setAddCreditNoteRows([{ creditNoteNo: '', creditNoteDate: '' }])
+    setAddCreditNoteRows([emptyAddCreditNoteRow()])
     setAddCreditNoteApplyDateToAll(false)
   }
 
@@ -1043,7 +1149,7 @@ export default function CreditNoteTrackingPage() {
               ? clerk?.name ?? 'Unassigned'
               : STATUS_REQUIRES_SALESMAN.includes(row.status)
                 ? salesman?.name ?? 'Unassigned'
-                : row.status === 'Delivery In Progress'
+                : row.status === 'Delivery In Progress' || row.status === 'Delivered' || row.status === 'Completed'
                   ? salesman?.name ?? driver?.name ?? 'Unassigned'
                   : driver?.name ?? 'Unassigned'
     const assignedDate =
@@ -1076,14 +1182,25 @@ export default function CreditNoteTrackingPage() {
       setOverwriteCreditNoteModal((prev) => ({ ...prev, index: prev.index + 1 }))
     } else {
       for (const e of nonConflicting) {
-        const newRow = createCreditNote({ creditNoteNo: e.creditNoteNo, creditNoteDate: e.creditNoteDate })
+        const newRow = createCreditNote({
+        creditNoteNo: e.creditNoteNo,
+        creditNoteDate: e.creditNoteDate,
+        discrepancy: saveAdditionalRemark(e.additionalRemark),
+      })
         const inserted = await insertCreditNote(newRow)
+        recordInitialStatus({
+          entityType: 'credit_note',
+          entityId: inserted.id,
+          documentNo: inserted.creditNoteNo,
+          status: inserted.status || 'Billed',
+          statusAt: inserted.statusUpdatedAt,
+        })
         setCreditNotes((prev) => [...prev, inserted])
       }
       setOverwriteCreditNoteModal({ open: false, conflicts: [], nonConflicting: [], index: 0 })
       setAddCreditNoteFormOpen(false)
       setAddCreditNoteConfirmOpen(false)
-      setAddCreditNoteRows([{ creditNoteNo: '', creditNoteDate: '' }])
+      setAddCreditNoteRows([emptyAddCreditNoteRow()])
       setAddCreditNoteApplyDateToAll(false)
     }
   }
@@ -1094,14 +1211,25 @@ export default function CreditNoteTrackingPage() {
       setOverwriteCreditNoteModal((prev) => ({ ...prev, index: prev.index + 1 }))
     } else {
       for (const e of nonConflicting) {
-        const newRow = createCreditNote({ creditNoteNo: e.creditNoteNo, creditNoteDate: e.creditNoteDate })
+        const newRow = createCreditNote({
+        creditNoteNo: e.creditNoteNo,
+        creditNoteDate: e.creditNoteDate,
+        discrepancy: saveAdditionalRemark(e.additionalRemark),
+      })
         const inserted = await insertCreditNote(newRow)
+        recordInitialStatus({
+          entityType: 'credit_note',
+          entityId: inserted.id,
+          documentNo: inserted.creditNoteNo,
+          status: inserted.status || 'Billed',
+          statusAt: inserted.statusUpdatedAt,
+        })
         setCreditNotes((prev) => [...prev, inserted])
       }
       setOverwriteCreditNoteModal({ open: false, conflicts: [], nonConflicting: [], index: 0 })
       setAddCreditNoteFormOpen(false)
       setAddCreditNoteConfirmOpen(false)
-      setAddCreditNoteRows([{ creditNoteNo: '', creditNoteDate: '' }])
+      setAddCreditNoteRows([emptyAddCreditNoteRow()])
       setAddCreditNoteApplyDateToAll(false)
     }
   }
@@ -1114,14 +1242,15 @@ export default function CreditNoteTrackingPage() {
     setAddCreditNoteFormOpen(false)
     setAddCreditNoteConfirmOpen(false)
     setOverwriteCreditNoteModal({ open: false, conflicts: [], nonConflicting: [], index: 0 })
-    setAddCreditNoteRows([{ creditNoteNo: '', creditNoteDate: '' }])
+    setAddCreditNoteRows([emptyAddCreditNoteRow()])
     setAddCreditNoteApplyDateToAll(false)
   }
 
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between gap-4 flex-wrap">
-        <div className="flex items-center gap-2 min-w-0">
+        <div className="flex items-center gap-4 flex-wrap min-w-0">
+          <div className="flex items-center gap-2 min-w-0">
           <label htmlFor="credit-note-no-search" className="text-sm font-medium text-slate-700 shrink-0">
             Credit Note No.
           </label>
@@ -1134,14 +1263,22 @@ export default function CreditNoteTrackingPage() {
             className="py-2 px-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-900 focus:border-blue-900 w-48 max-w-full text-sm"
             aria-label="Search by credit note number"
           />
+          </div>
+          <TrackingMonthFilter
+            id="credit-note-month-filter"
+            availableMonths={availableMonths}
+            value={selectedMonth}
+            onChange={setSelectedMonth}
+          />
         </div>
         <div className="flex items-center gap-4 shrink-0">
+          <RefreshListButton onRefresh={loadCreditNotes} loading={creditNotesLoading} label="Refresh credit note list" />
         <button
           type="button"
           onClick={() => {
             setAddCreditNoteFormOpen(true)
             setAddCreditNoteConfirmOpen(false)
-            setAddCreditNoteRows(addCreditNoteMultiple ? Array(10).fill(null).map(() => ({ creditNoteNo: '', creditNoteDate: '' })) : [{ creditNoteNo: '', creditNoteDate: '' }])
+            setAddCreditNoteRows(addCreditNoteMultiple ? Array(10).fill(null).map(() => emptyAddCreditNoteRow()) : [emptyAddCreditNoteRow()])
             setAddCreditNoteApplyDateToAll(false)
           }}
           className="inline-flex items-center gap-2 px-4 py-2 bg-blue-900 text-white rounded-lg hover:bg-blue-800 text-sm font-medium"
@@ -1155,9 +1292,13 @@ export default function CreditNoteTrackingPage() {
       <div className="bg-white rounded-lg shadow border border-slate-200 overflow-x-auto">
         {creditNotesLoading ? (
           <div className="p-8 text-center text-slate-500">Loading credit notes…</div>
-        ) : filteredCreditNotes.length === 0 ? (
+        ) : filteredCreditNoteCount === 0 ? (
           <div className="p-8 text-center text-slate-500">
-            {creditNoteSearchQuery.trim() ? 'No credit notes match your search.' : 'No credit notes added yet. Click &quot;Add New Credit Note&quot; to add one.'}
+            {creditNoteSearchQuery.trim()
+              ? 'No credit notes match your search.'
+              : selectedMonth
+                ? `No credit notes for ${formatMonthLabel(selectedMonth)}.`
+                : 'No credit notes added yet. Click "Add New Credit Note" to add one.'}
           </div>
         ) : (
         <table className="w-full min-w-[900px] text-sm">
@@ -1182,12 +1323,12 @@ export default function CreditNoteTrackingPage() {
               <th className="text-left py-3 px-4 font-semibold text-slate-700">Assigned To</th>
               <th className="text-left py-3 px-4 font-semibold text-slate-700">Assigned Date</th>
               <th className="text-left py-3 px-4 font-semibold text-slate-700">Remark</th>
-              <th className="text-left py-3 px-4 font-semibold text-slate-700">Discrepancy</th>
+              <th className="text-left py-3 px-4 font-semibold text-slate-700">Additional Remark</th>
               {canUseTestMode && <th className="text-left py-3 px-4 font-semibold text-slate-700 w-14">Delete</th>}
             </tr>
           </thead>
           <tbody>
-            {filteredCreditNotes.map((row) => {
+            {pagedCreditNotes.map((row) => {
               const salesman = row.assignedSalesmanId
                 ? salesmen.find((s) => s.id === row.assignedSalesmanId)
                 : null
@@ -1234,12 +1375,12 @@ export default function CreditNoteTrackingPage() {
               const showAssignedPerson =
                 (STATUS_REQUIRES_CLERK.includes(row.status) && clerk) ||
                 (STATUS_REQUIRES_SALESMAN.includes(row.status) && salesman) ||
-                (row.status === 'Delivery In Progress' && (salesman || assignedDriver))
+                (STATUS_SHOWS_DELIVERY_ASSIGNEE.includes(row.status) && (salesman || assignedDriver))
               const assignedPersonName = STATUS_REQUIRES_CLERK.includes(row.status)
                 ? (clerk?.name ?? '')
                 : STATUS_REQUIRES_SALESMAN.includes(row.status)
                   ? (salesman?.name ?? '')
-                  : row.status === 'Delivery In Progress'
+                  : STATUS_SHOWS_DELIVERY_ASSIGNEE.includes(row.status)
                     ? (salesman?.name ?? assignedDriver?.name ?? '')
                     : ''
               const assignedToDisplay =
@@ -1252,12 +1393,17 @@ export default function CreditNoteTrackingPage() {
                       : showAssignedPerson
                         ? assignedPersonName
                         : (assignedDriver?.name ?? 'Unassigned')
+              const canReassignAssignee =
+                !isCompletedLocked &&
+                assignedToDisplay !== 'Unassigned' &&
+                (assignedToDisplay === salesman?.name || assignedToDisplay === assignedDriver?.name)
               const assignedDateDisplay =
                 row.deliveryDate && row.deliverySlot
                   ? `${formatDate(row.deliveryDate)} - ${row.deliverySlot}`
                   : row.deliveryDate
                     ? formatDate(row.deliveryDate)
                     : '–'
+              const canReassignDate = !isCompletedLocked && assignedDateDisplay !== '–' && !!row.deliveryDate
               const isAssignedDateReadOnlyClerkSalesman =
                 STATUS_REQUIRES_CLERK.includes(row.status) ||
                 STATUS_REQUIRES_SALESMAN.includes(row.status) ||
@@ -1334,20 +1480,33 @@ export default function CreditNoteTrackingPage() {
                     )}
                   </td>
                   <td className="py-2 px-4">
-                    <span
-                      className={`py-1.5 px-2 block min-w-[140px] ${
-                        assignedToDisplay === 'Unassigned' ? 'text-slate-500' : 'text-slate-700'
-                      }`}
-                    >
-                      {assignedToDisplay}
-                    </span>
+                    <AssignedToCell
+                      name={assignedToDisplay}
+                      showReassign={canReassignAssignee}
+                      onReassign={() =>
+                        setReassignModal({
+                          open: true,
+                          rowId: row.id,
+                          currentName: assignedToDisplay,
+                        })
+                      }
+                    />
                   </td>
                   <td className="py-2 px-4">
-                    <span
-                      className="py-1.5 px-2 block min-w-[140px] text-slate-700"
-                    >
-                      {assignedDateDisplay}
-                    </span>
+                    <AssignedToCell
+                      name={assignedDateDisplay}
+                      showReassign={canReassignDate}
+                      reassignLabel="Reassign date"
+                      onReassign={() =>
+                        setReassignDateModal({
+                          open: true,
+                          rowId: row.id,
+                          currentLabel: assignedDateDisplay,
+                          initialDate: row.deliveryDate || '',
+                          initialSlot: row.deliverySlot || '',
+                        })
+                      }
+                    />
                   </td>
                   <td className="py-2 px-4">
                     <input
@@ -1364,76 +1523,11 @@ export default function CreditNoteTrackingPage() {
                     />
                   </td>
                   <td className="py-2 px-4">
-                    <div className="flex items-center gap-2">
-                      {isCompletedLocked ? (
-                        <>
-                          <input
-                            type="checkbox"
-                            checked={row.discrepancy?.checked ?? false}
-                            disabled
-                            className="rounded border-slate-300 text-blue-900 opacity-70 cursor-not-allowed"
-                          />
-                          {row.discrepancy?.checked && row.discrepancy?.title ? (
-                            <span
-                              className="relative group/tip max-w-[120px] truncate text-slate-700"
-                              title={row.discrepancy?.description}
-                            >
-                              {row.discrepancy.title}
-                              {row.discrepancy.description && (
-                                <span className="absolute left-0 bottom-full mb-1 hidden group-hover/tip:block z-10 py-2 px-3 bg-slate-800 text-white text-xs rounded shadow-lg max-w-[220px] whitespace-normal">
-                                  {row.discrepancy.description}
-                                </span>
-                              )}
-                            </span>
-                          ) : row.discrepancy?.checked ? (
-                            <span className="text-slate-500 text-xs">No details</span>
-                          ) : null}
-                        </>
-                      ) : row.discrepancy?.checked ? (
-                        <>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setDiscrepancyModal({
-                                open: true,
-                                rowId: row.id,
-                                title: row.discrepancy?.title || '',
-                                description: row.discrepancy?.description || '',
-                              })
-                            }
-                            className="p-1.5 rounded text-slate-600 hover:bg-slate-100"
-                            title="Edit discrepancy"
-                            aria-label="Edit discrepancy"
-                          >
-                            <Pencil size={18} />
-                          </button>
-                          {row.discrepancy?.title ? (
-                            <span
-                              className="relative group/tip max-w-[120px] truncate text-slate-700"
-                              title={row.discrepancy?.description}
-                            >
-                              {row.discrepancy.title}
-                              {row.discrepancy.description && (
-                                <span className="absolute left-0 bottom-full mb-1 hidden group-hover/tip:block z-10 py-2 px-3 bg-slate-800 text-white text-xs rounded shadow-lg max-w-[220px] whitespace-normal">
-                                  {row.discrepancy.description}
-                                </span>
-                              )}
-                            </span>
-                          ) : (
-                            <span className="text-slate-500 text-xs">No details</span>
-                          )}
-                        </>
-                      ) : (
-                        <>
-                          <input
-                            type="checkbox"
-                            checked={false}
-                            onChange={(e) => e.target.checked && handleDiscrepancyCheck(row.id, true)}
-                            className="rounded border-slate-300 text-blue-900 focus:ring-blue-900"
-                          />
-                        </>
-                      )}
-                    </div>
+                    <AdditionalRemarkCell
+                      discrepancy={row.discrepancy}
+                      canEdit={!isCompletedLocked}
+                      onEdit={() => handleAdditionalRemarkOpen(row.id)}
+                    />
                   </td>
                   {canUseTestMode && !isCompletedLocked && (
                     <td className="py-2 px-4">
@@ -1453,11 +1547,19 @@ export default function CreditNoteTrackingPage() {
           </tbody>
         </table>
         )}
+        {!creditNotesLoading && filteredCreditNoteCount > 0 && (
+          <TrackingPagination
+            currentPage={currentPage}
+            totalPages={totalPages}
+            totalItems={filteredCreditNoteCount}
+            onPageChange={goToPage}
+          />
+        )}
       </div>
 
       {/* Add New Credit Note - Form */}
       {addCreditNoteFormOpen && !addCreditNoteConfirmOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50" onClick={handleAddCreditNoteFormClose}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50">
           <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-auto p-6" onClick={(e) => e.stopPropagation()}>
             <h3 className="text-lg font-semibold text-slate-800 mb-4">Add New Credit Note</h3>
             <label className="flex items-center gap-2 mb-4 cursor-pointer">
@@ -1490,6 +1592,16 @@ export default function CreditNoteTrackingPage() {
                     className="w-full py-2 px-3 border border-slate-300 rounded focus:ring-2 focus:ring-blue-900"
                   />
                 </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Additional Remark</label>
+                  <input
+                    type="text"
+                    value={addCreditNoteRows[0]?.additionalRemark || ''}
+                    onChange={(e) => setAddCreditNoteRow(0, 'additionalRemark', e.target.value)}
+                    className="w-full py-2 px-3 border border-slate-300 rounded focus:ring-2 focus:ring-blue-900"
+                    placeholder="Optional"
+                  />
+                </div>
               </div>
             ) : (
               <div className="overflow-x-auto">
@@ -1498,6 +1610,7 @@ export default function CreditNoteTrackingPage() {
                     <tr className="bg-slate-100">
                       <th className="text-left py-2 px-3 font-semibold text-slate-700">Credit Note No</th>
                       <th className="text-left py-2 px-3 font-semibold text-slate-700">Credit Note Date</th>
+                      <th className="text-left py-2 px-3 font-semibold text-slate-700">Additional Remark</th>
                       <th className="text-left py-2 px-3 font-semibold text-slate-700 w-28">
                         <label className="flex items-center gap-1 cursor-pointer">
                           <input
@@ -1530,6 +1643,15 @@ export default function CreditNoteTrackingPage() {
                             onChange={(e) => setAddCreditNoteRow(i, 'creditNoteDate', e.target.value)}
                             disabled={addCreditNoteApplyDateToAll && i > 0}
                             className={`w-full py-1.5 px-2 border rounded text-sm ${addCreditNoteApplyDateToAll && i > 0 ? 'bg-slate-100 border-slate-200' : 'border-slate-300'}`}
+                          />
+                        </td>
+                        <td className="py-2 px-3">
+                          <input
+                            type="text"
+                            value={row.additionalRemark || ''}
+                            onChange={(e) => setAddCreditNoteRow(i, 'additionalRemark', e.target.value)}
+                            className="w-full py-1.5 px-2 border border-slate-300 rounded text-sm"
+                            placeholder="Optional"
                           />
                         </td>
                         <td className="py-2 px-3" />
@@ -1622,22 +1744,13 @@ export default function CreditNoteTrackingPage() {
         onSelect={handleDeliverySlotSelect}
       />
 
-      <DiscrepancyModal
-        isOpen={discrepancyModal.open}
-        initialTitle={discrepancyModal.title}
-        initialDesc={discrepancyModal.description}
-        onClose={() => {
-          if (discrepancyModal.rowId) handleDiscrepancyCancel(discrepancyModal.rowId)
-          setDiscrepancyModal({ open: false, rowId: null, title: '', description: '' })
-        }}
-        onSave={({ title, description }) =>
-          discrepancyModal.rowId &&
-          handleDiscrepancySave(discrepancyModal.rowId, { title, description })
-        }
-        onRemove={
-          discrepancyModal.rowId
-            ? () => handleDiscrepancyCancel(discrepancyModal.rowId)
-            : undefined
+      <AdditionalRemarkModal
+        isOpen={additionalRemarkModal.open}
+        initialRemark={additionalRemarkModal.remark}
+        onClose={closeAdditionalRemarkModal}
+        onSave={(remark) =>
+          additionalRemarkModal.rowId &&
+          handleAdditionalRemarkSave(additionalRemarkModal.rowId, remark)
         }
       />
 
@@ -1679,6 +1792,7 @@ export default function CreditNoteTrackingPage() {
 
       <SelectWarehouseModal
         isOpen={holdWarehouseModal.open}
+        ownOnly
         rowId={holdWarehouseModal.rowId}
         previousStatus={holdWarehouseModal.previousStatus}
         onClose={handleHoldWarehouseModalCancel}
@@ -1687,6 +1801,7 @@ export default function CreditNoteTrackingPage() {
 
       <SelectWarehouseModal
         isOpen={chopSignNoWarehouseModal.open}
+        ownOnly
         rowId={chopSignNoWarehouseModal.rowId}
         previousStatus={chopSignNoWarehouseModal.previousStatus}
         onClose={handleChopSignNoWarehouseCancel}
@@ -1747,6 +1862,34 @@ export default function CreditNoteTrackingPage() {
             : setDriverModal({ open: false, rowId: null, previousStatus: '' })
         }
         onSelect={handleDriverSelect}
+      />
+
+      <ReassignAssigneeModal
+        isOpen={reassignModal.open}
+        currentName={reassignModal.currentName}
+        onClose={() => setReassignModal({ open: false, rowId: null, currentName: '' })}
+        onConfirm={({ type, personId }) => {
+          if (reassignModal.rowId) {
+            updateRow(reassignModal.rowId, reassignAssigneeUpdates(type, personId))
+          }
+          setReassignModal({ open: false, rowId: null, currentName: '' })
+        }}
+      />
+
+      <ReassignAssignedDateModal
+        isOpen={reassignDateModal.open}
+        currentLabel={reassignDateModal.currentLabel}
+        initialDate={reassignDateModal.initialDate}
+        initialSlot={reassignDateModal.initialSlot}
+        onClose={() =>
+          setReassignDateModal({ open: false, rowId: null, currentLabel: '', initialDate: '', initialSlot: '' })
+        }
+        onConfirm={({ date, slot }) => {
+          if (reassignDateModal.rowId) {
+            updateRow(reassignDateModal.rowId, reassignDateUpdates(date, slot))
+          }
+          setReassignDateModal({ open: false, rowId: null, currentLabel: '', initialDate: '', initialSlot: '' })
+        }}
       />
 
       <NoticeModal
@@ -1890,6 +2033,12 @@ export default function CreditNoteTrackingPage() {
           </div>
         </div>
       )}
+
+      <RemoveSelfCollectModal
+        isOpen={removeSelfCollectModal.open}
+        onYes={handleRemoveSelfCollectYes}
+        onNo={handleRemoveSelfCollectNo}
+      />
 
       {chopSignWarehouseConfirmModal.open && (
         <div

@@ -9,15 +9,40 @@ import { formatDate, toInputDate, parseDate } from '../utils/dateFormat'
 import { sortBySerial } from '../utils/serialSort'
 import { fetchDeliveryOrders, insertDeliveryOrder, updateDeliveryOrder, deleteDeliveryOrder } from '../api/deliveryOrders'
 import { fetchInvoices, updateInvoice } from '../api/invoices'
+import { fetchInvoices as fetchAutocountInvoices, updateInvoice as updateAutocountInvoice } from '../api/autocountInvoices'
+import InvoiceAttachmentSearch from '../components/InvoiceAttachmentSearch'
+import LinkedTrackingRemark from '../components/LinkedTrackingRemark'
+import { buildDocNoLookup } from '../utils/grcGrnSync'
+import {
+  buildCombinedInvoiceLookup,
+  buildInvoiceUpdateForDocLink,
+  buildRemarkWithLinkedInvoice,
+  hasLinkedInvoice,
+  resolveLinkedInvoice,
+} from '../utils/invoiceLinkSync'
 import DeliverySlotModal from '../components/DeliverySlotModal'
-import DiscrepancyModal from '../components/DiscrepancyModal'
+import AdditionalRemarkModal from '../components/AdditionalRemarkModal'
+import AdditionalRemarkCell from '../components/AdditionalRemarkCell'
 import SelectSalesmanModal from '../components/SelectSalesmanModal'
 import SelectClerkModal from '../components/SelectClerkModal'
 import SelectWarehouseModal from '../components/SelectWarehouseModal'
 import HoldWarehouseTypeModal from '../components/HoldWarehouseTypeModal'
+import RemoveSelfCollectModal from '../components/RemoveSelfCollectModal'
 import SelectDriverModal from '../components/SelectDriverModal'
+import AssignedToCell from '../components/AssignedToCell'
+import ReassignAssigneeModal, { reassignAssigneeUpdates } from '../components/ReassignAssigneeModal'
+import ReassignAssignedDateModal, { reassignDateUpdates } from '../components/ReassignAssignedDateModal'
 import NoticeModal from '../components/NoticeModal'
+import RefreshListButton from '../components/RefreshListButton'
+import TrackingMonthFilter from '../components/TrackingMonthFilter'
+import TrackingPagination from '../components/TrackingPagination'
 import { useRealtimeTable } from '../hooks/useRealtimeTable'
+import { useTrackingListView } from '../hooks/useTrackingListView'
+import { formatMonthLabel } from '../utils/trackingListFilters'
+import { appendChopSignToRemark, hasSelfCollectInRemark, leavingChopSignRemarkPayload } from '../utils/remarkUtils'
+import { isStatusOverdue } from '../utils/alertStatus'
+import { recordStatusTransition, recordInitialStatus } from '../utils/recordStatusTransition'
+import { useAlertSettings } from '../context/AlertSettingsContext'
 
 function getTodayDateStr() {
   const d = new Date()
@@ -68,6 +93,7 @@ const PHASE_2 = [
 const PHASE_3 = ['Delivery In Progress']
 const PHASE_4 = ['Delivered']
 const PHASE_5 = ['Completed', 'Cancelled']
+const STATUS_SHOWS_DELIVERY_ASSIGNEE = ['Delivery In Progress', 'Delivered', 'Completed']
 
 function getPhase(status) {
   if (PHASE_1.includes(status)) return 1
@@ -78,32 +104,21 @@ function getPhase(status) {
   return 1
 }
 
-function getStatusMaxDays(status) {
-  if (status === 'Cancelled') return 999
-  if (PHASE_1.includes(status)) return 1
-  if (status === 'Preparing Delivery') return 3
-  if (PHASE_2.includes(status)) return 4
-  if (PHASE_3.includes(status)) return 1.5
-  if (PHASE_4.includes(status)) return 1
-  if (PHASE_5.includes(status)) return 1
-  return 1
-}
-
-function isStatusOverdue(row) {
-  const updatedAt = row?.statusUpdatedAt
-  if (!updatedAt) return false
-  const updated = new Date(updatedAt).getTime()
-  const now = Date.now()
-  const maxDays = getStatusMaxDays(row.status)
-  const maxMs = maxDays * 24 * 60 * 60 * 1000
-  return now - updated > maxMs
-}
-
 const DELIVERED_VALIDATION_MSG = 'Assigned person and date is missing, please go to preparing delivery.'
 const DELIVERY_IN_PROGRESS_VALIDATION_MSG = 'Driver and Delivery date yet to be assigned.'
 const PHASE_4_LOCKED_MSG = 'This Status can no longer be changed as the order has been completed.'
 
-const defaultDiscrepancy = () => ({ checked: false, title: '', description: '' })
+import { defaultAdditionalRemark, getAdditionalRemarkText, saveAdditionalRemark } from '../utils/additionalRemark'
+
+function emptyAddDoRow() {
+  return {
+    deliveryOrderNo: '',
+    deliveryOrderDate: '',
+    additionalRemark: '',
+    attachmentQuery: '',
+    attachmentInvoice: null,
+  }
+}
 
 function createDeliveryOrder(overrides = {}) {
   return {
@@ -123,13 +138,14 @@ function createDeliveryOrder(overrides = {}) {
     deliverySlot: '',
     remark: '',
     remarkAtBilled: '', // kept when backtracking from Phase 2 to Billed
-    discrepancy: defaultDiscrepancy(),
+    discrepancy: defaultAdditionalRemark(),
     ...overrides,
   }
 }
 
 export default function DeliveryOrderTrackingPage() {
   const { isSuperuser } = useAuth()
+  const { settings: alertSettings } = useAlertSettings()
   const { testMode } = useTestMode()
   const { employees } = useEmployees()
   const { warehouses } = useWarehouses()
@@ -138,9 +154,11 @@ export default function DeliveryOrderTrackingPage() {
   const canUseTestMode = testMode && isSuperuser
   const [deliveryOrders, setDeliveryOrders] = useState([])
   const [deliveryOrdersLoading, setDeliveryOrdersLoading] = useState(true)
+  const [esdInvoicesList, setEsdInvoicesList] = useState([])
+  const [autocountInvoicesList, setAutocountInvoicesList] = useState([])
   const [addDeliveryOrderFormOpen, setAddDeliveryOrderFormOpen] = useState(false)
   const [addDeliveryOrderMultiple, setAddDeliveryOrderMultiple] = useState(false)
-  const [addDeliveryOrderRows, setAddDeliveryOrderRows] = useState([{ deliveryOrderNo: '', deliveryOrderDate: '' }])
+  const [addDeliveryOrderRows, setAddDeliveryOrderRows] = useState([emptyAddDoRow()])
   const [addDeliveryOrderApplyDateToAll, setAddDeliveryOrderApplyDateToAll] = useState(false)
   const [addDeliveryOrderConfirmOpen, setAddDeliveryOrderConfirmOpen] = useState(false)
   const [overwriteDeliveryOrderModal, setOverwriteDeliveryOrderModal] = useState({
@@ -150,15 +168,22 @@ export default function DeliveryOrderTrackingPage() {
     index: 0,
   })
   const [deliveryModal, setDeliveryModal] = useState({ open: false, rowId: null, dateLabel: '' })
-  const [discrepancyModal, setDiscrepancyModal] = useState({
+  const [additionalRemarkModal, setAdditionalRemarkModal] = useState({
     open: false,
     rowId: null,
-    title: '',
-    description: '',
+    remark: '',
   })
   const [datePickerRow, setDatePickerRow] = useState(null)
   const [deliveryOrderDatePickerRow, setDeliveryOrderDatePickerRow] = useState(null)
   const [salesmanModal, setSalesmanModal] = useState({ open: false, rowId: null, previousStatus: '' })
+  const [reassignModal, setReassignModal] = useState({ open: false, rowId: null, currentName: '' })
+  const [reassignDateModal, setReassignDateModal] = useState({
+    open: false,
+    rowId: null,
+    currentLabel: '',
+    initialDate: '',
+    initialSlot: '',
+  })
   const [clerkModal, setClerkModal] = useState({ open: false, rowId: null, previousStatus: '' })
   const [warehouseModal, setWarehouseModal] = useState({ open: false, rowId: null, previousStatus: '' })
   const [holdWarehouseModal, setHoldWarehouseModal] = useState({ open: false, rowId: null, previousStatus: '' })
@@ -204,6 +229,10 @@ export default function DeliveryOrderTrackingPage() {
     rowId: null,
     previousStatus: '',
   })
+  const [removeSelfCollectModal, setRemoveSelfCollectModal] = useState({
+    open: false,
+    pending: null,
+  })
   const [phase4LockedNoticeOpen, setPhase4LockedNoticeOpen] = useState(false)
   const [backtrackPhase2To1Modal, setBacktrackPhase2To1Modal] = useState({ open: false, rowId: null })
   const [backtrackPhase3To1Modal, setBacktrackPhase3To1Modal] = useState({ open: false, rowId: null })
@@ -240,15 +269,27 @@ export default function DeliveryOrderTrackingPage() {
   const [invoiceAttachedNotice, setInvoiceAttachedNotice] = useState({ open: false, message: '' })
   const [invoiceSearchList, setInvoiceSearchList] = useState([])
   const [deliveryOrderSearchQuery, setDeliveryOrderSearchQuery] = useState('')
-  const filteredDeliveryOrders = useMemo(() => {
-    const q = (deliveryOrderSearchQuery || '').trim().toLowerCase()
-    const list = !q
-      ? deliveryOrders
-      : deliveryOrders.filter((row) =>
-          (row.deliveryOrderNo || '').toLowerCase().includes(q)
-        )
-    return sortBySerial(list, (row) => row.deliveryOrderNo)
-  }, [deliveryOrders, deliveryOrderSearchQuery])
+  const getDeliveryOrderDate = useCallback((row) => row.deliveryOrderDate, [])
+  const getDeliveryOrderSearch = useCallback((row) => row.deliveryOrderNo, [])
+  const sortDeliveryOrders = useCallback((list) => sortBySerial(list, (row) => row.deliveryOrderNo), [])
+  const {
+    availableMonths,
+    selectedMonth,
+    setSelectedMonth,
+    filteredRows: filteredDeliveryOrders,
+    pageRows: pagedDeliveryOrders,
+    currentPage,
+    totalPages,
+    totalItems: filteredDeliveryOrderCount,
+    goToPage,
+  } = useTrackingListView({
+    pageKey: 'delivery-orders',
+    rows: deliveryOrders,
+    searchQuery: deliveryOrderSearchQuery,
+    getDateField: getDeliveryOrderDate,
+    getSearchField: getDeliveryOrderSearch,
+    sortRows: sortDeliveryOrders,
+  })
   const assignDatePendingRef = useRef({
     rowId: null,
     fromDriver: false,
@@ -273,7 +314,48 @@ export default function DeliveryOrderTrackingPage() {
     loadDeliveryOrders()
   }, [loadDeliveryOrders])
 
+  useEffect(() => {
+    fetchInvoices()
+      .then((list) => setEsdInvoicesList(Array.isArray(list) ? list : []))
+      .catch((e) => {
+        console.error('Fetch ESD invoices for DO link error:', e)
+        setEsdInvoicesList([])
+      })
+    fetchAutocountInvoices()
+      .then((list) => setAutocountInvoicesList(Array.isArray(list) ? list : []))
+      .catch((e) => {
+        console.error('Fetch Autocount invoices for DO link error:', e)
+        setAutocountInvoicesList([])
+      })
+  }, [])
+
   useRealtimeTable('delivery_orders', setDeliveryOrders)
+
+  const doLookup = useMemo(() => buildDocNoLookup(deliveryOrders, 'deliveryOrderNo'), [deliveryOrders])
+  const invoiceLookup = useMemo(
+    () => buildCombinedInvoiceLookup(esdInvoicesList, autocountInvoicesList),
+    [esdInvoicesList, autocountInvoicesList]
+  )
+  const syncGuardRef = useRef(false)
+
+  const syncDoToLinkedInvoice = useCallback(
+    async (doRow) => {
+      if (syncGuardRef.current) return
+      const linked = resolveLinkedInvoice(doRow, esdInvoicesList, autocountInvoicesList)
+      if (!linked) return
+      syncGuardRef.current = true
+      try {
+        const payload = buildInvoiceUpdateForDocLink(linked, doRow, doRow.deliveryOrderNo)
+        const updateApi = linked._linkType === 'autocount' ? updateAutocountInvoice : updateInvoice
+        await updateApi(linked.id, payload)
+      } catch (e) {
+        console.error('Sync DO to linked invoice error:', e)
+      } finally {
+        syncGuardRef.current = false
+      }
+    },
+    [esdInvoicesList, autocountInvoicesList]
+  )
 
   const [highlightRowId, setHighlightRowId] = useState(null)
   useEffect(() => {
@@ -295,12 +377,22 @@ export default function DeliveryOrderTrackingPage() {
         ? { ...updates, statusUpdatedAt: new Date().toISOString() }
         : updates
     setDeliveryOrders((prev) => {
+      const prevRow = prev.find((r) => r.id === id)
+      if (updates.status !== undefined && prevRow && updates.status !== prevRow.status) {
+        recordStatusTransition(prevRow, updates.status, {
+          entityType: 'delivery_order',
+          getDocumentNo: (r) => r.deliveryOrderNo,
+        })
+      }
       const next = prev.map((row) => (row.id === id ? { ...row, ...withTimestamp } : row))
       const row = next.find((r) => r.id === id)
       if (!row) return next
       updateDeliveryOrder(id, row)
         .then((updated) => {
-          if (updated) setDeliveryOrders((p) => p.map((r) => (r.id === id ? updated : r)))
+          if (updated) {
+            setDeliveryOrders((p) => p.map((r) => (r.id === id ? updated : r)))
+            if (hasLinkedInvoice(updated)) syncDoToLinkedInvoice(updated)
+          }
         })
         .catch((e) => console.error('Update delivery order error:', e))
       return next
@@ -417,31 +509,22 @@ export default function DeliveryOrderTrackingPage() {
     })
   }
 
-  const handleDiscrepancyCheck = (rowId, checked) => {
-    if (checked) {
-      const row = deliveryOrders.find((r) => r.id === rowId)
-      updateRow(rowId, { discrepancy: { ...row.discrepancy, checked: true } })
-      setDiscrepancyModal({
-        open: true,
-        rowId,
-        title: row?.discrepancy?.title || '',
-        description: row?.discrepancy?.description || '',
-      })
-    } else {
-      updateRow(rowId, { discrepancy: defaultDiscrepancy() })
-    }
+  const closeAdditionalRemarkModal = () => {
+    setAdditionalRemarkModal({ open: false, rowId: null, remark: '' })
   }
 
-  const handleDiscrepancySave = (rowId, { title, description }) => {
-    updateRow(rowId, {
-      discrepancy: { checked: true, title, description },
+  const handleAdditionalRemarkOpen = (rowId) => {
+    const row = deliveryOrders.find((r) => r.id === rowId)
+    setAdditionalRemarkModal({
+      open: true,
+      rowId,
+      remark: getAdditionalRemarkText(row?.discrepancy),
     })
-    setDiscrepancyModal({ open: false, rowId: null, title: '', description: '' })
   }
 
-  const handleDiscrepancyCancel = (rowId) => {
-    updateRow(rowId, { discrepancy: defaultDiscrepancy() })
-    setDiscrepancyModal({ open: false, rowId: null, title: '', description: '' })
+  const handleAdditionalRemarkSave = (rowId, remark) => {
+    updateRow(rowId, { discrepancy: saveAdditionalRemark(remark) })
+    closeAdditionalRemarkModal()
   }
 
   const handleStatusChange = (rowId, newStatus, previousStatus) => {
@@ -524,29 +607,35 @@ export default function DeliveryOrderTrackingPage() {
       newStatus.startsWith('Hold -') || newStatus.startsWith('Chop & Sign -')
     const fromBilledToPhase2 = row.status === 'Billed' && newPhase === 2
     const remarkAtBilledUpdate = fromBilledToPhase2 ? { remarkAtBilled: row.remark ?? '' } : {}
+    const chopSignRemarkUpdate = leavingChopSignRemarkPayload(row.status, newStatus, row.remark)
     if (newStatus === 'Delivery In Progress') {
       updateRow(rowId, {
         status: newStatus,
         assignedSalesmanId: null,
         assignedDriverId: null,
         ...remarkAtBilledUpdate,
+        ...chopSignRemarkUpdate,
       })
       setPreparingDeliveryTypeModal({ open: true, rowId, previousStatus })
     } else if (STATUS_REQUIRES_SALESMAN.includes(newStatus)) {
-      updateRow(rowId, { status: newStatus, assignedDriverId: null, ...remarkAtBilledUpdate })
+      updateRow(rowId, { status: newStatus, assignedDriverId: null, ...remarkAtBilledUpdate, ...chopSignRemarkUpdate })
       setSalesmanModal({ open: true, rowId, previousStatus })
     } else if (STATUS_REQUIRES_CLERK.includes(newStatus)) {
-      updateRow(rowId, { status: newStatus, assignedDriverId: null, ...remarkAtBilledUpdate })
+      updateRow(rowId, { status: newStatus, assignedDriverId: null, ...remarkAtBilledUpdate, ...chopSignRemarkUpdate })
       setClerkModal({ open: true, rowId, previousStatus })
     } else if (newStatus === STATUS_TRANSFER) {
-      updateRow(rowId, { status: newStatus, ...remarkAtBilledUpdate })
+      updateRow(rowId, { status: newStatus, ...remarkAtBilledUpdate, ...chopSignRemarkUpdate })
       setWarehouseModal({ open: true, rowId, previousStatus })
     } else if (newStatus === 'Hold - Warehouse') {
-      updateRow(rowId, { status: newStatus, assignedDriverId: null, ...remarkAtBilledUpdate })
+      updateRow(rowId, { status: newStatus, assignedDriverId: null, ...remarkAtBilledUpdate, ...chopSignRemarkUpdate })
       setHoldWarehouseModal({ open: true, rowId, previousStatus })
     } else if (newStatus === 'Chop & Sign - Warehouse') {
       setChopSignWarehouseConfirmModal({ open: true, rowId, previousStatus })
       return
+    } else if (newStatus === 'Delivered') {
+      const payload = { status: newStatus, ...remarkAtBilledUpdate, ...chopSignRemarkUpdate }
+      updateRow(rowId, payload)
+      afterBulkableCommit(rowId, payload, () => {})
     } else {
       const payload = {
         status: newStatus,
@@ -555,6 +644,7 @@ export default function DeliveryOrderTrackingPage() {
         transferWarehouseId: null,
         ...(clearDriverForHoldOrChop ? { assignedDriverId: null } : {}),
         ...remarkAtBilledUpdate,
+        ...chopSignRemarkUpdate,
       }
       updateRow(rowId, payload)
       afterBulkableCommit(rowId, payload, () => {})
@@ -583,7 +673,7 @@ export default function DeliveryOrderTrackingPage() {
     updateRow(rowId, { assignedClerkId: clerkId })
     setClerkModal({ open: false, rowId: null, previousStatus: '' })
     const row = deliveryOrders.find((r) => r.id === rowId)
-    assignDatePendingRef.current = { rowId, fromDriver: false }
+    assignDatePendingRef.current = { rowId, fromDriver: false, clerkId }
     setAssignDateModal({
       open: true,
       rowId,
@@ -678,9 +768,8 @@ export default function DeliveryOrderTrackingPage() {
       remark: newRemark,
     }
     updateRow(rowId, payload)
-    afterBulkableCommit(rowId, payload, () =>
-      setHoldWarehouseTypeModal({ open: false, rowId: null, warehouseId: null, warehouseName: '', previousStatus: '' })
-    )
+    setHoldWarehouseTypeModal({ open: false, rowId: null, warehouseId: null, warehouseName: '', previousStatus: '' })
+    afterBulkableCommit(rowId, payload, () => {})
   }
 
   const handleHoldWarehouseTypeCancel = () => {
@@ -807,7 +896,12 @@ export default function DeliveryOrderTrackingPage() {
       holdWarehouseId: null,
       holdWarehouseType: '',
     }
-    const payload = { status: newStatus, ...resetPhase3Fields }
+    const row = deliveryOrders.find((r) => r.id === rowId)
+    const payload = {
+      status: newStatus,
+      ...resetPhase3Fields,
+      ...leavingChopSignRemarkPayload(previousStatus, newStatus, row?.remark),
+    }
     updateRow(rowId, payload)
     afterBulkableCommit(rowId, payload, () => {
       setPhase3ToOtherPhase2Modal({ open: false, rowId: null, newStatus: '', previousStatus: '' })
@@ -879,7 +973,11 @@ export default function DeliveryOrderTrackingPage() {
 
   const handleCompletedConfirmYes = () => {
     const { rowId } = completedConfirmModal
-    const payload = { status: 'Completed' }
+    const row = deliveryOrders.find((r) => r.id === rowId)
+    const payload = {
+      status: 'Completed',
+      ...leavingChopSignRemarkPayload(row?.status, 'Completed', row?.remark),
+    }
     if (rowId) updateRow(rowId, payload)
     afterBulkableCommit(rowId, payload, () => setCompletedConfirmModal({ open: false, rowId: null }))
   }
@@ -912,13 +1010,73 @@ export default function DeliveryOrderTrackingPage() {
     setDriverModal({ open: true, rowId, previousStatus, fromChopSignWarehouse: true })
   }
 
+  const applyChopSignRemarkUpdate = (pending, removeSelfCollect) => {
+    const { rowIdToUse, dateToSave, fromChopSignNoFlow, fromChopSignWarehouse } = pending
+    const row = deliveryOrders.find((r) => r.id === rowIdToUse)
+    const newRemark = appendChopSignToRemark(row?.remark, { removeSelfCollect })
+    if (fromChopSignNoFlow) {
+      const { warehouseId } = fromChopSignNoFlow
+      const payload = {
+        status: 'Hold - Warehouse',
+        holdWarehouseId: warehouseId,
+        holdWarehouseType: removeSelfCollect ? '' : row?.holdWarehouseType ?? '',
+        assignedDriverId: null,
+        deliveryDate: dateToSave,
+        deliverySlot: '',
+        remark: newRemark,
+      }
+      updateRow(rowIdToUse, payload)
+      afterBulkableCommit(rowIdToUse, payload, () => {})
+    } else if (fromChopSignWarehouse) {
+      const payload = {
+        status: 'Delivery In Progress',
+        deliveryDate: dateToSave,
+        deliverySlot: '',
+        remark: newRemark,
+        ...(removeSelfCollect ? { holdWarehouseType: '' } : {}),
+      }
+      updateRow(rowIdToUse, payload)
+      afterBulkableCommit(rowIdToUse, payload, () => {})
+    }
+  }
+
+  const handleRemoveSelfCollectYes = () => {
+    const { pending } = removeSelfCollectModal
+    if (pending) applyChopSignRemarkUpdate(pending, true)
+    setRemoveSelfCollectModal({ open: false, pending: null })
+  }
+
+  const handleRemoveSelfCollectNo = () => {
+    const { pending } = removeSelfCollectModal
+    if (pending) applyChopSignRemarkUpdate(pending, false)
+    setRemoveSelfCollectModal({ open: false, pending: null })
+  }
+
   const handleAssignDateConfirm = () => {
     const ref = assignDatePendingRef.current
-    const { rowId: refRowId, fromDriver, fromChopSignWarehouse, fromChopSignNoFlow } = ref
+    const { rowId: refRowId, fromDriver, fromChopSignWarehouse, fromChopSignNoFlow, clerkId } = ref
     const rowIdToUse = refRowId ?? assignDateModal.rowId
     const dateStr = assignDateModal.selectedDate || getTodayDateStr()
     const parsed = parseDate(dateStr)
     const dateToSave = parsed || getTodayDateStr()
+
+    if (rowIdToUse && (fromChopSignNoFlow || fromChopSignWarehouse)) {
+      const row = deliveryOrders.find((r) => r.id === rowIdToUse)
+      if (hasSelfCollectInRemark(row?.remark)) {
+        setRemoveSelfCollectModal({
+          open: true,
+          pending: { rowIdToUse, dateToSave, fromChopSignNoFlow, fromChopSignWarehouse },
+        })
+        assignDatePendingRef.current = {
+          rowId: null,
+          fromDriver: false,
+          fromChopSignWarehouse: false,
+          fromChopSignNoFlow: null,
+        }
+        setAssignDateModal({ open: false, rowId: null, selectedDate: '', fromDriver: false })
+        return
+      }
+    }
 
     assignDatePendingRef.current = {
       rowId: null,
@@ -930,36 +1088,11 @@ export default function DeliveryOrderTrackingPage() {
 
     try {
       if (rowIdToUse) {
-        if (fromChopSignNoFlow) {
-          const { warehouseId } = fromChopSignNoFlow
-          const row = deliveryOrders.find((r) => r.id === rowIdToUse)
-          const currentRemark = row?.remark?.trim() || ''
-          const newRemark = currentRemark ? `${currentRemark} / Chop & Sign` : 'Chop & Sign'
-          const payload = {
-            status: 'Hold - Warehouse',
-            holdWarehouseId: warehouseId,
-            holdWarehouseType: '',
-            assignedDriverId: null,
-            deliveryDate: dateToSave,
-            deliverySlot: '',
-            remark: newRemark,
-          }
-          updateRow(rowIdToUse, payload)
-          afterBulkableCommit(rowIdToUse, payload, () => {})
-          return
-        }
-        if (fromChopSignWarehouse) {
-          const row = deliveryOrders.find((r) => r.id === rowIdToUse)
-          const currentRemark = row?.remark?.trim() || ''
-          const newRemark = currentRemark ? `${currentRemark} / Chop & Sign` : 'Chop & Sign'
-          const payload = {
-            status: 'Delivery In Progress',
-            deliveryDate: dateToSave,
-            deliverySlot: '',
-            remark: newRemark,
-          }
-          updateRow(rowIdToUse, payload)
-          afterBulkableCommit(rowIdToUse, payload, () => {})
+        if (fromChopSignNoFlow || fromChopSignWarehouse) {
+          applyChopSignRemarkUpdate(
+            { rowIdToUse, dateToSave, fromChopSignNoFlow, fromChopSignWarehouse },
+            false
+          )
           return
         }
         updateRow(rowIdToUse, { deliveryDate: dateToSave, deliverySlot: '' })
@@ -967,10 +1100,12 @@ export default function DeliveryOrderTrackingPage() {
           setDeliveryModal({ open: true, rowId: rowIdToUse, dateLabel: formatDate(dateToSave) })
         } else {
           const leadRow = deliveryOrders.find((r) => r.id === rowIdToUse)
+          const assignedClerkId = clerkId ?? leadRow?.assignedClerkId ?? null
           const payload = leadRow
             ? {
                 status: leadRow.status,
                 assignedSalesmanId: leadRow.assignedSalesmanId,
+                assignedClerkId,
                 assignedDriverId: leadRow.assignedDriverId,
                 deliveryDate: dateToSave,
                 deliverySlot: '',
@@ -1145,11 +1280,11 @@ export default function DeliveryOrderTrackingPage() {
   const handleAddDeliveryOrderMultipleToggle = (on) => {
     setAddDeliveryOrderMultiple(on)
     if (on) {
-      const newRows = Array(10).fill(null).map(() => ({ deliveryOrderNo: '', deliveryOrderDate: '' }))
+      const newRows = Array(10).fill(null).map(() => emptyAddDoRow())
       setAddDeliveryOrderRows(newRows)
       setAddDeliveryOrderApplyDateToAll(false)
     } else {
-      const first = addDeliveryOrderRows[0] ? { ...addDeliveryOrderRows[0] } : { deliveryOrderNo: '', deliveryOrderDate: '' }
+      const first = addDeliveryOrderRows[0] ? { ...addDeliveryOrderRows[0] } : emptyAddDoRow()
       setAddDeliveryOrderRows([first])
       setAddDeliveryOrderApplyDateToAll(false)
     }
@@ -1171,8 +1306,40 @@ export default function DeliveryOrderTrackingPage() {
       .map((r) => ({
         deliveryOrderNo: r.deliveryOrderNo?.trim(),
         deliveryOrderDate: addDeliveryOrderApplyDateToAll ? firstDate : (r.deliveryOrderDate || ''),
+        additionalRemark: (r.additionalRemark || '').trim(),
+        attachmentInvoice: r.attachmentInvoice || null,
       }))
       .filter((e) => e.deliveryOrderNo)
+  }
+
+  const linkDoToInvoice = async (doRow, attachmentInvoice) => {
+    if (!attachmentInvoice?.invoiceNo) return
+    const payload = buildInvoiceUpdateForDocLink(attachmentInvoice, doRow, doRow.deliveryOrderNo)
+    const updateApi = attachmentInvoice._source === 'autocount' ? updateAutocountInvoice : updateInvoice
+    await updateApi(attachmentInvoice.id, payload)
+  }
+
+  const persistNewDeliveryOrder = async (entry) => {
+    const remark = buildRemarkWithLinkedInvoice(entry.attachmentInvoice?.invoiceNo, '')
+    const discrepancy = saveAdditionalRemark(entry.additionalRemark)
+    const newRow = createDeliveryOrder({
+      deliveryOrderNo: entry.deliveryOrderNo,
+      deliveryOrderDate: entry.deliveryOrderDate,
+      remark,
+      discrepancy,
+    })
+    const inserted = await insertDeliveryOrder(newRow)
+    recordInitialStatus({
+      entityType: 'delivery_order',
+      entityId: inserted.id,
+      documentNo: inserted.deliveryOrderNo,
+      status: inserted.status || 'Billed',
+      statusAt: inserted.statusUpdatedAt,
+    })
+    if (entry.attachmentInvoice) {
+      await linkDoToInvoice(inserted, entry.attachmentInvoice)
+    }
+    return inserted
   }
 
   const handleAddDeliveryOrderProceed = () => {
@@ -1200,13 +1367,12 @@ export default function DeliveryOrderTrackingPage() {
       return
     }
     for (const e of nonConflicting) {
-      const newRow = createDeliveryOrder({ deliveryOrderNo: e.deliveryOrderNo, deliveryOrderDate: e.deliveryOrderDate })
-      const inserted = await insertDeliveryOrder(newRow)
+      const inserted = await persistNewDeliveryOrder(e)
       setDeliveryOrders((prev) => [...prev, inserted])
     }
     setAddDeliveryOrderFormOpen(false)
     setAddDeliveryOrderConfirmOpen(false)
-    setAddDeliveryOrderRows([{ deliveryOrderNo: '', deliveryOrderDate: '' }])
+    setAddDeliveryOrderRows([emptyAddDoRow()])
     setAddDeliveryOrderApplyDateToAll(false)
   }
 
@@ -1227,7 +1393,7 @@ export default function DeliveryOrderTrackingPage() {
               ? clerk?.name ?? 'Unassigned'
               : STATUS_REQUIRES_SALESMAN.includes(row.status)
                 ? salesman?.name ?? 'Unassigned'
-                : row.status === 'Delivery In Progress'
+                : row.status === 'Delivery In Progress' || row.status === 'Delivered' || row.status === 'Completed'
                   ? salesman?.name ?? driver?.name ?? 'Unassigned'
                   : driver?.name ?? 'Unassigned'
     const assignedDate =
@@ -1260,14 +1426,13 @@ export default function DeliveryOrderTrackingPage() {
       setOverwriteDeliveryOrderModal((prev) => ({ ...prev, index: prev.index + 1 }))
     } else {
       for (const e of nonConflicting) {
-        const newRow = createDeliveryOrder({ deliveryOrderNo: e.deliveryOrderNo, deliveryOrderDate: e.deliveryOrderDate })
-        const inserted = await insertDeliveryOrder(newRow)
+        const inserted = await persistNewDeliveryOrder(e)
         setDeliveryOrders((prev) => [...prev, inserted])
       }
       setOverwriteDeliveryOrderModal({ open: false, conflicts: [], nonConflicting: [], index: 0 })
       setAddDeliveryOrderFormOpen(false)
       setAddDeliveryOrderConfirmOpen(false)
-      setAddDeliveryOrderRows([{ deliveryOrderNo: '', deliveryOrderDate: '' }])
+      setAddDeliveryOrderRows([emptyAddDoRow()])
       setAddDeliveryOrderApplyDateToAll(false)
     }
   }
@@ -1278,14 +1443,13 @@ export default function DeliveryOrderTrackingPage() {
       setOverwriteDeliveryOrderModal((prev) => ({ ...prev, index: prev.index + 1 }))
     } else {
       for (const e of nonConflicting) {
-        const newRow = createDeliveryOrder({ deliveryOrderNo: e.deliveryOrderNo, deliveryOrderDate: e.deliveryOrderDate })
-        const inserted = await insertDeliveryOrder(newRow)
+        const inserted = await persistNewDeliveryOrder(e)
         setDeliveryOrders((prev) => [...prev, inserted])
       }
       setOverwriteDeliveryOrderModal({ open: false, conflicts: [], nonConflicting: [], index: 0 })
       setAddDeliveryOrderFormOpen(false)
       setAddDeliveryOrderConfirmOpen(false)
-      setAddDeliveryOrderRows([{ deliveryOrderNo: '', deliveryOrderDate: '' }])
+      setAddDeliveryOrderRows([emptyAddDoRow()])
       setAddDeliveryOrderApplyDateToAll(false)
     }
   }
@@ -1298,14 +1462,15 @@ export default function DeliveryOrderTrackingPage() {
     setAddDeliveryOrderFormOpen(false)
     setAddDeliveryOrderConfirmOpen(false)
     setOverwriteDeliveryOrderModal({ open: false, conflicts: [], nonConflicting: [], index: 0 })
-    setAddDeliveryOrderRows([{ deliveryOrderNo: '', deliveryOrderDate: '' }])
+    setAddDeliveryOrderRows([emptyAddDoRow()])
     setAddDeliveryOrderApplyDateToAll(false)
   }
 
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between gap-4 flex-wrap">
-        <div className="flex items-center gap-2 min-w-0">
+        <div className="flex items-center gap-4 flex-wrap min-w-0">
+          <div className="flex items-center gap-2 min-w-0">
           <label htmlFor="delivery-order-no-search" className="text-sm font-medium text-slate-700 shrink-0">
             Delivery Order No.
           </label>
@@ -1318,14 +1483,22 @@ export default function DeliveryOrderTrackingPage() {
             className="py-2 px-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-900 focus:border-blue-900 w-48 max-w-full text-sm"
             aria-label="Search by delivery order number"
           />
+          </div>
+          <TrackingMonthFilter
+            id="delivery-order-month-filter"
+            availableMonths={availableMonths}
+            value={selectedMonth}
+            onChange={setSelectedMonth}
+          />
         </div>
         <div className="flex items-center gap-4 shrink-0">
+          <RefreshListButton onRefresh={loadDeliveryOrders} loading={deliveryOrdersLoading} label="Refresh delivery order list" />
         <button
           type="button"
           onClick={() => {
             setAddDeliveryOrderFormOpen(true)
             setAddDeliveryOrderConfirmOpen(false)
-            setAddDeliveryOrderRows(addDeliveryOrderMultiple ? Array(10).fill(null).map(() => ({ deliveryOrderNo: '', deliveryOrderDate: '' })) : [{ deliveryOrderNo: '', deliveryOrderDate: '' }])
+            setAddDeliveryOrderRows(addDeliveryOrderMultiple ? Array(10).fill(null).map(() => emptyAddDoRow()) : [emptyAddDoRow()])
             setAddDeliveryOrderApplyDateToAll(false)
           }}
           className="inline-flex items-center gap-2 px-4 py-2 bg-blue-900 text-white rounded-lg hover:bg-blue-800 text-sm font-medium"
@@ -1339,9 +1512,13 @@ export default function DeliveryOrderTrackingPage() {
       <div className="bg-white rounded-lg shadow border border-slate-200 overflow-x-auto">
         {deliveryOrdersLoading ? (
           <div className="p-8 text-center text-slate-500">Loading delivery orders…</div>
-        ) : filteredDeliveryOrders.length === 0 ? (
+        ) : filteredDeliveryOrderCount === 0 ? (
           <div className="p-8 text-center text-slate-500">
-            {deliveryOrderSearchQuery.trim() ? 'No delivery orders match your search.' : 'No delivery orders added yet. Click &quot;Add New Delivery Order&quot; to add one.'}
+            {deliveryOrderSearchQuery.trim()
+              ? 'No delivery orders match your search.'
+              : selectedMonth
+                ? `No delivery orders for ${formatMonthLabel(selectedMonth)}.`
+                : 'No delivery orders added yet. Click "Add New Delivery Order" to add one.'}
           </div>
         ) : (
         <table className="w-full min-w-[900px] text-sm">
@@ -1367,12 +1544,12 @@ export default function DeliveryOrderTrackingPage() {
               <th className="text-left py-3 px-4 font-semibold text-slate-700">Assigned To</th>
               <th className="text-left py-3 px-4 font-semibold text-slate-700">Assigned Date</th>
               <th className="text-left py-3 px-4 font-semibold text-slate-700">Remark</th>
-              <th className="text-left py-3 px-4 font-semibold text-slate-700">Discrepancy</th>
+              <th className="text-left py-3 px-4 font-semibold text-slate-700">Additional Remark</th>
               {canUseTestMode && <th className="text-left py-3 px-4 font-semibold text-slate-700 w-14">Delete</th>}
             </tr>
           </thead>
           <tbody>
-            {filteredDeliveryOrders.map((row) => {
+            {pagedDeliveryOrders.map((row) => {
               const salesman = row.assignedSalesmanId
                 ? salesmen.find((s) => s.id === row.assignedSalesmanId)
                 : null
@@ -1419,12 +1596,12 @@ export default function DeliveryOrderTrackingPage() {
               const showAssignedPerson =
                 (STATUS_REQUIRES_CLERK.includes(row.status) && clerk) ||
                 (STATUS_REQUIRES_SALESMAN.includes(row.status) && salesman) ||
-                (row.status === 'Delivery In Progress' && (salesman || assignedDriver))
+                (STATUS_SHOWS_DELIVERY_ASSIGNEE.includes(row.status) && (salesman || assignedDriver))
               const assignedPersonName = STATUS_REQUIRES_CLERK.includes(row.status)
                 ? (clerk?.name ?? '')
                 : STATUS_REQUIRES_SALESMAN.includes(row.status)
                   ? (salesman?.name ?? '')
-                  : row.status === 'Delivery In Progress'
+                  : STATUS_SHOWS_DELIVERY_ASSIGNEE.includes(row.status)
                     ? (salesman?.name ?? assignedDriver?.name ?? '')
                     : ''
               const assignedToDisplay =
@@ -1437,12 +1614,17 @@ export default function DeliveryOrderTrackingPage() {
                       : showAssignedPerson
                         ? assignedPersonName
                         : (assignedDriver?.name ?? 'Unassigned')
+              const canReassignAssignee =
+                !isCompletedLocked &&
+                assignedToDisplay !== 'Unassigned' &&
+                (assignedToDisplay === salesman?.name || assignedToDisplay === assignedDriver?.name)
               const assignedDateDisplay =
                 row.deliveryDate && row.deliverySlot
                   ? `${formatDate(row.deliveryDate)} - ${row.deliverySlot}`
                   : row.deliveryDate
                     ? formatDate(row.deliveryDate)
                     : '–'
+              const canReassignDate = !isCompletedLocked && assignedDateDisplay !== '–' && !!row.deliveryDate
               const isAssignedDateReadOnlyClerkSalesman =
                 STATUS_REQUIRES_CLERK.includes(row.status) ||
                 STATUS_REQUIRES_SALESMAN.includes(row.status) ||
@@ -1486,8 +1668,8 @@ export default function DeliveryOrderTrackingPage() {
                       aria-label={`Select delivery order ${row.deliveryOrderNo || row.id}`}
                     />
                   </td>
-                  <td className="py-2 px-4 w-12 text-center" title={isStatusOverdue(row) ? `Status "${row.status}" has exceeded the allowed duration (Phase ${getPhase(row.status)})` : ''}>
-                    {isStatusOverdue(row) ? (
+                  <td className="py-2 px-4 w-12 text-center" title={isStatusOverdue(row, alertSettings) ? `Status "${row.status}" has exceeded the allowed duration (Phase ${getPhase(row.status)})` : ''}>
+                    {isStatusOverdue(row, alertSettings) ? (
                       <AlertTriangle size={20} className="text-amber-500 inline-block" aria-label="Status overdue" />
                     ) : (
                       <span className="text-slate-300" aria-hidden>–</span>
@@ -1527,106 +1709,63 @@ export default function DeliveryOrderTrackingPage() {
                     )}
                   </td>
                   <td className="py-2 px-4">
-                    <span
-                      className={`py-1.5 px-2 block min-w-[140px] ${
-                        assignedToDisplay === 'Unassigned' ? 'text-slate-500' : 'text-slate-700'
-                      }`}
-                    >
-                      {assignedToDisplay}
-                    </span>
-                  </td>
-                  <td className="py-2 px-4">
-                    <span
-                      className="py-1.5 px-2 block min-w-[140px] text-slate-700"
-                    >
-                      {assignedDateDisplay}
-                    </span>
-                  </td>
-                  <td className="py-2 px-4">
-                    <input
-                      type="text"
-                      value={row.remark}
-                      onChange={(e) => updateRow(row.id, { remark: e.target.value })}
-                      readOnly={!canEditRow}
-                      className={`w-full min-w-[100px] py-1.5 px-2 border rounded ${
-                        canEditRow
-                          ? 'border-slate-300 focus:ring-2 focus:ring-blue-900'
-                          : 'border-transparent bg-transparent read-only:bg-transparent'
-                      }`}
-                      placeholder="Remark"
+                    <AssignedToCell
+                      name={assignedToDisplay}
+                      showReassign={canReassignAssignee}
+                      onReassign={() =>
+                        setReassignModal({
+                          open: true,
+                          rowId: row.id,
+                          currentName: assignedToDisplay,
+                        })
+                      }
                     />
                   </td>
                   <td className="py-2 px-4">
-                    <div className="flex items-center gap-2">
-                      {isCompletedLocked ? (
-                        <>
-                          <input
-                            type="checkbox"
-                            checked={row.discrepancy?.checked ?? false}
-                            disabled
-                            className="rounded border-slate-300 text-blue-900 opacity-70 cursor-not-allowed"
-                          />
-                          {row.discrepancy?.checked && row.discrepancy?.title ? (
-                            <span
-                              className="relative group/tip max-w-[120px] truncate text-slate-700"
-                              title={row.discrepancy?.description}
-                            >
-                              {row.discrepancy.title}
-                              {row.discrepancy.description && (
-                                <span className="absolute left-0 bottom-full mb-1 hidden group-hover/tip:block z-10 py-2 px-3 bg-slate-800 text-white text-xs rounded shadow-lg max-w-[220px] whitespace-normal">
-                                  {row.discrepancy.description}
-                                </span>
-                              )}
-                            </span>
-                          ) : row.discrepancy?.checked ? (
-                            <span className="text-slate-500 text-xs">No details</span>
-                          ) : null}
-                        </>
-                      ) : row.discrepancy?.checked ? (
-                        <>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setDiscrepancyModal({
-                                open: true,
-                                rowId: row.id,
-                                title: row.discrepancy?.title || '',
-                                description: row.discrepancy?.description || '',
-                              })
-                            }
-                            className="p-1.5 rounded text-slate-600 hover:bg-slate-100"
-                            title="Edit discrepancy"
-                            aria-label="Edit discrepancy"
-                          >
-                            <Pencil size={18} />
-                          </button>
-                          {row.discrepancy?.title ? (
-                            <span
-                              className="relative group/tip max-w-[120px] truncate text-slate-700"
-                              title={row.discrepancy?.description}
-                            >
-                              {row.discrepancy.title}
-                              {row.discrepancy.description && (
-                                <span className="absolute left-0 bottom-full mb-1 hidden group-hover/tip:block z-10 py-2 px-3 bg-slate-800 text-white text-xs rounded shadow-lg max-w-[220px] whitespace-normal">
-                                  {row.discrepancy.description}
-                                </span>
-                              )}
-                            </span>
-                          ) : (
-                            <span className="text-slate-500 text-xs">No details</span>
-                          )}
-                        </>
-                      ) : (
-                        <>
-                          <input
-                            type="checkbox"
-                            checked={false}
-                            onChange={(e) => e.target.checked && handleDiscrepancyCheck(row.id, true)}
-                            className="rounded border-slate-300 text-blue-900 focus:ring-blue-900"
-                          />
-                        </>
-                      )}
-                    </div>
+                    <AssignedToCell
+                      name={assignedDateDisplay}
+                      showReassign={canReassignDate}
+                      reassignLabel="Reassign date"
+                      onReassign={() =>
+                        setReassignDateModal({
+                          open: true,
+                          rowId: row.id,
+                          currentLabel: assignedDateDisplay,
+                          initialDate: row.deliveryDate || '',
+                          initialSlot: row.deliverySlot || '',
+                        })
+                      }
+                    />
+                  </td>
+                  <td className="py-2 px-4">
+                    {hasLinkedInvoice(row) ? (
+                      <LinkedTrackingRemark
+                        remark={row.remark}
+                        doLookup={doLookup}
+                        invoiceLookup={invoiceLookup}
+                        className="py-1.5 px-2 block min-w-[100px]"
+                      />
+                    ) : (
+                      <input
+                        type="text"
+                        value={row.remark}
+                        onChange={(e) => updateRow(row.id, { remark: e.target.value })}
+                        readOnly={!canEditRow}
+                        className={`w-full min-w-[100px] py-1.5 px-2 border rounded ${
+                          canEditRow
+                            ? 'border-slate-300 focus:ring-2 focus:ring-blue-900'
+                            : 'border-transparent bg-transparent read-only:bg-transparent'
+                        }`}
+                        placeholder="Remark"
+                      />
+                    )}
+                  </td>
+                  <td className="py-2 px-4">
+                    <AdditionalRemarkCell
+                      discrepancy={row.discrepancy}
+                      canEdit={!isCompletedLocked}
+                      onEdit={() => handleAdditionalRemarkOpen(row.id)}
+                    />
                   </td>
                   {canUseTestMode && !isCompletedLocked && (
                     <td className="py-2 px-4">
@@ -1646,11 +1785,19 @@ export default function DeliveryOrderTrackingPage() {
           </tbody>
         </table>
         )}
+        {!deliveryOrdersLoading && filteredDeliveryOrderCount > 0 && (
+          <TrackingPagination
+            currentPage={currentPage}
+            totalPages={totalPages}
+            totalItems={filteredDeliveryOrderCount}
+            onPageChange={goToPage}
+          />
+        )}
       </div>
 
       {/* Add New Delivery Order - Form */}
       {addDeliveryOrderFormOpen && !addDeliveryOrderConfirmOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50" onClick={handleAddDeliveryOrderFormClose}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50">
           <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-auto p-6" onClick={(e) => e.stopPropagation()}>
             <h3 className="text-lg font-semibold text-slate-800 mb-4">Add New Delivery Order</h3>
             <label className="flex items-center gap-2 mb-4 cursor-pointer">
@@ -1683,6 +1830,24 @@ export default function DeliveryOrderTrackingPage() {
                     className="w-full py-2 px-3 border border-slate-300 rounded focus:ring-2 focus:ring-blue-900"
                   />
                 </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Additional Remark</label>
+                  <input
+                    type="text"
+                    value={addDeliveryOrderRows[0]?.additionalRemark || ''}
+                    onChange={(e) => setAddDeliveryOrderRow(0, 'additionalRemark', e.target.value)}
+                    className="w-full py-2 px-3 border border-slate-300 rounded focus:ring-2 focus:ring-blue-900"
+                    placeholder="Optional"
+                  />
+                </div>
+                <InvoiceAttachmentSearch
+                  esdInvoices={esdInvoicesList}
+                  autocountInvoices={autocountInvoicesList}
+                  query={addDeliveryOrderRows[0]?.attachmentQuery || ''}
+                  onQueryChange={(value) => setAddDeliveryOrderRow(0, 'attachmentQuery', value)}
+                  selected={addDeliveryOrderRows[0]?.attachmentInvoice || null}
+                  onSelect={(inv) => setAddDeliveryOrderRow(0, 'attachmentInvoice', inv)}
+                />
               </div>
             ) : (
               <div className="overflow-x-auto">
@@ -1691,6 +1856,7 @@ export default function DeliveryOrderTrackingPage() {
                     <tr className="bg-slate-100">
                       <th className="text-left py-2 px-3 font-semibold text-slate-700">Delivery Order No</th>
                       <th className="text-left py-2 px-3 font-semibold text-slate-700">Delivery Order Date</th>
+                      <th className="text-left py-2 px-3 font-semibold text-slate-700">Additional Remark</th>
                       <th className="text-left py-2 px-3 font-semibold text-slate-700 w-28">
                         <label className="flex items-center gap-1 cursor-pointer">
                           <input
@@ -1723,6 +1889,15 @@ export default function DeliveryOrderTrackingPage() {
                             onChange={(e) => setAddDeliveryOrderRow(i, 'deliveryOrderDate', e.target.value)}
                             disabled={addDeliveryOrderApplyDateToAll && i > 0}
                             className={`w-full py-1.5 px-2 border rounded text-sm ${addDeliveryOrderApplyDateToAll && i > 0 ? 'bg-slate-100 border-slate-200' : 'border-slate-300'}`}
+                          />
+                        </td>
+                        <td className="py-2 px-3">
+                          <input
+                            type="text"
+                            value={row.additionalRemark || ''}
+                            onChange={(e) => setAddDeliveryOrderRow(i, 'additionalRemark', e.target.value)}
+                            className="w-full py-1.5 px-2 border border-slate-300 rounded text-sm"
+                            placeholder="Optional"
                           />
                         </td>
                         <td className="py-2 px-3" />
@@ -1957,22 +2132,13 @@ export default function DeliveryOrderTrackingPage() {
         onClose={() => setInvoiceAttachedNotice({ open: false, message: '' })}
       />
 
-      <DiscrepancyModal
-        isOpen={discrepancyModal.open}
-        initialTitle={discrepancyModal.title}
-        initialDesc={discrepancyModal.description}
-        onClose={() => {
-          if (discrepancyModal.rowId) handleDiscrepancyCancel(discrepancyModal.rowId)
-          setDiscrepancyModal({ open: false, rowId: null, title: '', description: '' })
-        }}
-        onSave={({ title, description }) =>
-          discrepancyModal.rowId &&
-          handleDiscrepancySave(discrepancyModal.rowId, { title, description })
-        }
-        onRemove={
-          discrepancyModal.rowId
-            ? () => handleDiscrepancyCancel(discrepancyModal.rowId)
-            : undefined
+      <AdditionalRemarkModal
+        isOpen={additionalRemarkModal.open}
+        initialRemark={additionalRemarkModal.remark}
+        onClose={closeAdditionalRemarkModal}
+        onSave={(remark) =>
+          additionalRemarkModal.rowId &&
+          handleAdditionalRemarkSave(additionalRemarkModal.rowId, remark)
         }
       />
 
@@ -2014,6 +2180,7 @@ export default function DeliveryOrderTrackingPage() {
 
       <SelectWarehouseModal
         isOpen={holdWarehouseModal.open}
+        ownOnly
         rowId={holdWarehouseModal.rowId}
         previousStatus={holdWarehouseModal.previousStatus}
         onClose={handleHoldWarehouseModalCancel}
@@ -2022,6 +2189,7 @@ export default function DeliveryOrderTrackingPage() {
 
       <SelectWarehouseModal
         isOpen={chopSignNoWarehouseModal.open}
+        ownOnly
         rowId={chopSignNoWarehouseModal.rowId}
         previousStatus={chopSignNoWarehouseModal.previousStatus}
         onClose={handleChopSignNoWarehouseCancel}
@@ -2082,6 +2250,34 @@ export default function DeliveryOrderTrackingPage() {
             : setDriverModal({ open: false, rowId: null, previousStatus: '' })
         }
         onSelect={handleDriverSelect}
+      />
+
+      <ReassignAssigneeModal
+        isOpen={reassignModal.open}
+        currentName={reassignModal.currentName}
+        onClose={() => setReassignModal({ open: false, rowId: null, currentName: '' })}
+        onConfirm={({ type, personId }) => {
+          if (reassignModal.rowId) {
+            updateRow(reassignModal.rowId, reassignAssigneeUpdates(type, personId))
+          }
+          setReassignModal({ open: false, rowId: null, currentName: '' })
+        }}
+      />
+
+      <ReassignAssignedDateModal
+        isOpen={reassignDateModal.open}
+        currentLabel={reassignDateModal.currentLabel}
+        initialDate={reassignDateModal.initialDate}
+        initialSlot={reassignDateModal.initialSlot}
+        onClose={() =>
+          setReassignDateModal({ open: false, rowId: null, currentLabel: '', initialDate: '', initialSlot: '' })
+        }
+        onConfirm={({ date, slot }) => {
+          if (reassignDateModal.rowId) {
+            updateRow(reassignDateModal.rowId, reassignDateUpdates(date, slot))
+          }
+          setReassignDateModal({ open: false, rowId: null, currentLabel: '', initialDate: '', initialSlot: '' })
+        }}
       />
 
       <NoticeModal
@@ -2225,6 +2421,12 @@ export default function DeliveryOrderTrackingPage() {
           </div>
         </div>
       )}
+
+      <RemoveSelfCollectModal
+        isOpen={removeSelfCollectModal.open}
+        onYes={handleRemoveSelfCollectYes}
+        onNo={handleRemoveSelfCollectNo}
+      />
 
       {chopSignWarehouseConfirmModal.open && (
         <div

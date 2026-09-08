@@ -9,6 +9,8 @@ const BACKUP_KEYS = [
   'etracking_credit_notes',
   'etracking_delivery_orders',
   'etracking_grn',
+  'etracking_grc',
+  'etracking_idt',
 ]
 
 function downloadJson(data, filename) {
@@ -88,7 +90,7 @@ export default function JsonImportExportPage() {
           <section>
             <h3 className="text-sm font-medium text-slate-700 mb-2">Download backup</h3>
             <p className="text-slate-500 text-sm mb-3">
-              Save a JSON file containing employees, warehouses, invoices, credit notes, delivery orders, and GRN records.
+              Save a JSON file containing employees, warehouses, invoices, credit notes, delivery orders, GRN, and GRC records.
             </p>
             <button
               type="button"

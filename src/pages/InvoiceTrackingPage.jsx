@@ -9,15 +9,32 @@ import { formatDate, toInputDate, parseDate } from '../utils/dateFormat'
 import { sortBySerial } from '../utils/serialSort'
 import * as esdInvoicesApi from '../api/invoices'
 import * as autocountInvoicesApi from '../api/autocountInvoices'
+import { fetchGRNs, updateGRN } from '../api/grn'
+import { fetchDeliveryOrders, updateDeliveryOrder } from '../api/deliveryOrders'
+import LinkedTrackingRemark from '../components/LinkedTrackingRemark'
 import DeliverySlotModal from '../components/DeliverySlotModal'
-import DiscrepancyModal from '../components/DiscrepancyModal'
+import AdditionalRemarkModal from '../components/AdditionalRemarkModal'
+import AdditionalRemarkCell from '../components/AdditionalRemarkCell'
 import SelectSalesmanModal from '../components/SelectSalesmanModal'
 import SelectClerkModal from '../components/SelectClerkModal'
 import SelectWarehouseModal from '../components/SelectWarehouseModal'
 import HoldWarehouseTypeModal from '../components/HoldWarehouseTypeModal'
+import RemoveSelfCollectModal from '../components/RemoveSelfCollectModal'
 import SelectDriverModal from '../components/SelectDriverModal'
+import AssignedToCell from '../components/AssignedToCell'
+import ReassignAssigneeModal, { reassignAssigneeUpdates } from '../components/ReassignAssigneeModal'
+import ReassignAssignedDateModal, { reassignDateUpdates } from '../components/ReassignAssignedDateModal'
 import NoticeModal from '../components/NoticeModal'
+import RefreshListButton from '../components/RefreshListButton'
+import TrackingMonthFilter from '../components/TrackingMonthFilter'
+import TrackingPagination from '../components/TrackingPagination'
 import { useRealtimeTable } from '../hooks/useRealtimeTable'
+import { useTrackingListView } from '../hooks/useTrackingListView'
+import { formatMonthLabel } from '../utils/trackingListFilters'
+import { appendChopSignToRemark, hasSelfCollectInRemark, leavingChopSignRemarkPayload } from '../utils/remarkUtils'
+import { isStatusOverdue } from '../utils/alertStatus'
+import { recordStatusTransition, recordInitialStatus } from '../utils/recordStatusTransition'
+import { useAlertSettings } from '../context/AlertSettingsContext'
 
 function getTodayDateStr() {
   const d = new Date()
@@ -68,6 +85,7 @@ const PHASE_2 = [
 const PHASE_3 = ['Delivery In Progress']
 const PHASE_4 = ['Delivered']
 const PHASE_5 = ['Completed', 'Cancelled']
+const STATUS_SHOWS_DELIVERY_ASSIGNEE = ['Delivery In Progress', 'Delivered', 'Completed']
 
 function getPhase(status) {
   if (PHASE_1.includes(status)) return 1
@@ -78,33 +96,31 @@ function getPhase(status) {
   return 1
 }
 
-// Max duration (in days) the current status can be in without triggering an alert
-function getStatusMaxDays(status) {
-  if (status === 'Cancelled') return 999
-  if (PHASE_1.includes(status)) return 1
-  if (status === 'Preparing Delivery') return 3
-  if (PHASE_2.includes(status)) return 4
-  if (PHASE_3.includes(status)) return 1.5
-  if (PHASE_4.includes(status)) return 1
-  if (PHASE_5.includes(status)) return 1
-  return 1
-}
-
-function isStatusOverdue(row) {
-  const updatedAt = row?.statusUpdatedAt
-  if (!updatedAt) return false
-  const updated = new Date(updatedAt).getTime()
-  const now = Date.now()
-  const maxDays = getStatusMaxDays(row.status)
-  const maxMs = maxDays * 24 * 60 * 60 * 1000
-  return now - updated > maxMs
-}
-
 const DELIVERED_VALIDATION_MSG = 'Assigned person and date is missing, please go to preparing delivery.'
 const DELIVERY_IN_PROGRESS_VALIDATION_MSG = 'Driver and Delivery date yet to be assigned.'
 const PHASE_4_LOCKED_MSG = 'This Status can no longer be changed as the order has been completed.'
 
-const defaultDiscrepancy = () => ({ checked: false, title: '', description: '' })
+import {
+  getAutocountInvoiceNo,
+  buildAutocountAdditionalRemark,
+  getAddInvoiceFormTitle,
+  IV_PREFIX,
+  T_PREFIX,
+  IV_DIGIT_LEN,
+  T_DIGIT_LEN,
+} from '../utils/autocountInvoiceUtils'
+import { normalizeDigits, buildDocNoLookup } from '../utils/grcGrnSync'
+import {
+  buildDocUpdateForInvoiceLink,
+  hasLinkedDocInInvoiceRemark,
+  resolveLinkedDoFromInvoice,
+  resolveLinkedGrnFromInvoice,
+} from '../utils/invoiceLinkSync'
+import { defaultAdditionalRemark, getAdditionalRemarkText, saveAdditionalRemark } from '../utils/additionalRemark'
+
+function emptyAddInvoiceRow() {
+  return { invoiceNo: '', digits: '', dateOfInvoice: '', additionalRemark: '' }
+}
 
 function createInvoice(overrides = {}) {
   return {
@@ -123,8 +139,7 @@ function createInvoice(overrides = {}) {
     deliverySlot: '',
     remark: '',
     remarkAtBilled: '', // kept when backtracking from Phase 2 to Billed
-    cod: false,
-    discrepancy: defaultDiscrepancy(),
+    discrepancy: defaultAdditionalRemark(),
     ...overrides,
   }
 }
@@ -136,7 +151,9 @@ export default function InvoiceTrackingPage({ useAutocountStorage }) {
   const updateInvoice = api.updateInvoice
   const deleteInvoice = api.deleteInvoice
   const pageTitle = useAutocountStorage ? 'Autocount Invoice Tracking' : 'ESD Invoice Tracking'
+  const statusHistoryEntityType = useAutocountStorage ? 'autocount_invoice' : 'esd_invoice'
   const { isSuperuser } = useAuth()
+  const { settings: alertSettings } = useAlertSettings()
   const { testMode } = useTestMode()
   const { employees } = useEmployees()
   const { warehouses } = useWarehouses()
@@ -145,16 +162,25 @@ export default function InvoiceTrackingPage({ useAutocountStorage }) {
   const canUseTestMode = testMode && isSuperuser
   const [invoices, setInvoices] = useState([])
   const [invoicesLoading, setInvoicesLoading] = useState(true)
+  const [linkedGrns, setLinkedGrns] = useState([])
+  const [linkedDeliveryOrders, setLinkedDeliveryOrders] = useState([])
   const [deliveryModal, setDeliveryModal] = useState({ open: false, rowId: null, dateLabel: '' })
-  const [discrepancyModal, setDiscrepancyModal] = useState({
+  const [additionalRemarkModal, setAdditionalRemarkModal] = useState({
     open: false,
     rowId: null,
-    title: '',
-    description: '',
+    remark: '',
   })
   const [datePickerRow, setDatePickerRow] = useState(null)
   const [invoiceDatePickerRow, setInvoiceDatePickerRow] = useState(null)
   const [salesmanModal, setSalesmanModal] = useState({ open: false, rowId: null, previousStatus: '' })
+  const [reassignModal, setReassignModal] = useState({ open: false, rowId: null, currentName: '' })
+  const [reassignDateModal, setReassignDateModal] = useState({
+    open: false,
+    rowId: null,
+    currentLabel: '',
+    initialDate: '',
+    initialSlot: '',
+  })
   const [clerkModal, setClerkModal] = useState({ open: false, rowId: null, previousStatus: '' })
   const [warehouseModal, setWarehouseModal] = useState({ open: false, rowId: null, previousStatus: '' })
   const [holdWarehouseModal, setHoldWarehouseModal] = useState({ open: false, rowId: null, previousStatus: '' })
@@ -200,6 +226,10 @@ export default function InvoiceTrackingPage({ useAutocountStorage }) {
     rowId: null,
     previousStatus: '',
   })
+  const [removeSelfCollectModal, setRemoveSelfCollectModal] = useState({
+    open: false,
+    pending: null,
+  })
   const [phase4LockedNoticeOpen, setPhase4LockedNoticeOpen] = useState(false)
   const [backtrackPhase2To1Modal, setBacktrackPhase2To1Modal] = useState({ open: false, rowId: null })
   const [backtrackPhase3To1Modal, setBacktrackPhase3To1Modal] = useState({ open: false, rowId: null })
@@ -223,15 +253,42 @@ export default function InvoiceTrackingPage({ useAutocountStorage }) {
     payload: null,
     onApplied: null,
   })
-  const filteredInvoices = useMemo(() => {
-    const q = (invoiceSearchQuery || '').trim().toLowerCase()
-    const list = !q
-      ? invoices
-      : invoices.filter((row) =>
-          (row.invoiceNo || '').toLowerCase().includes(q)
-        )
-    return sortBySerial(list, (row) => row.invoiceNo)
-  }, [invoices, invoiceSearchQuery])
+  const [addInvoiceFormOpen, setAddInvoiceFormOpen] = useState(false)
+  const [addInvoiceKind, setAddInvoiceKind] = useState('iv')
+  const [addInvoiceMultiple, setAddInvoiceMultiple] = useState(false)
+  const [addInvoiceRows, setAddInvoiceRows] = useState([emptyAddInvoiceRow()])
+  const [addInvoiceApplyDateToAll, setAddInvoiceApplyDateToAll] = useState(false)
+  const [addInvoiceConfirmOpen, setAddInvoiceConfirmOpen] = useState(false)
+  const [addInvoiceConfirmSaving, setAddInvoiceConfirmSaving] = useState(false)
+  const [addInvoiceConfirmError, setAddInvoiceConfirmError] = useState('')
+  const [overwriteInvoiceModal, setOverwriteInvoiceModal] = useState({
+    open: false,
+    conflicts: [],
+    nonConflicting: [],
+    index: 0,
+  })
+  const trackingPageKey = useAutocountStorage ? 'autocount-invoices' : 'esd-invoices'
+  const getInvoiceDate = useCallback((row) => row.dateOfInvoice, [])
+  const getInvoiceSearch = useCallback((row) => row.invoiceNo, [])
+  const sortInvoices = useCallback((list) => sortBySerial(list, (row) => row.invoiceNo), [])
+  const {
+    availableMonths,
+    selectedMonth,
+    setSelectedMonth,
+    filteredRows: filteredInvoices,
+    pageRows: pagedInvoices,
+    currentPage,
+    totalPages,
+    totalItems: filteredInvoiceCount,
+    goToPage,
+  } = useTrackingListView({
+    pageKey: trackingPageKey,
+    rows: invoices,
+    searchQuery: invoiceSearchQuery,
+    getDateField: getInvoiceDate,
+    getSearchField: getInvoiceSearch,
+    sortRows: sortInvoices,
+  })
   const assignDatePendingRef = useRef({
     rowId: null,
     fromDriver: false,
@@ -256,7 +313,57 @@ export default function InvoiceTrackingPage({ useAutocountStorage }) {
     loadInvoices()
   }, [loadInvoices])
 
+  useEffect(() => {
+    fetchGRNs()
+      .then((list) => setLinkedGrns(Array.isArray(list) ? list : []))
+      .catch((e) => {
+        console.error('Fetch GRNs for invoice link error:', e)
+        setLinkedGrns([])
+      })
+    fetchDeliveryOrders()
+      .then((list) => setLinkedDeliveryOrders(Array.isArray(list) ? list : []))
+      .catch((e) => {
+        console.error('Fetch delivery orders for invoice link error:', e)
+        setLinkedDeliveryOrders([])
+      })
+  }, [])
+
   useRealtimeTable(useAutocountStorage ? 'invoices_autocount' : 'invoices', setInvoices)
+
+  const grnLookup = useMemo(() => buildDocNoLookup(linkedGrns, 'grnNo'), [linkedGrns])
+  const doLookup = useMemo(
+    () => buildDocNoLookup(linkedDeliveryOrders, 'deliveryOrderNo'),
+    [linkedDeliveryOrders]
+  )
+  const syncGuardRef = useRef(false)
+
+  const syncInvoiceToLinkedDoc = useCallback(
+    async (invoiceRow) => {
+      if (syncGuardRef.current) return
+      const grnRow = resolveLinkedGrnFromInvoice(invoiceRow, linkedGrns)
+      const doRow = grnRow ? null : resolveLinkedDoFromInvoice(invoiceRow, linkedDeliveryOrders)
+      const linked = grnRow || doRow
+      if (!linked) return
+      syncGuardRef.current = true
+      try {
+        const payload = buildDocUpdateForInvoiceLink(linked, invoiceRow, invoiceRow.invoiceNo)
+        if (grnRow) {
+          const updated = await updateGRN(grnRow.id, payload)
+          if (updated) setLinkedGrns((prev) => prev.map((r) => (r.id === updated.id ? updated : r)))
+        } else {
+          const updated = await updateDeliveryOrder(doRow.id, payload)
+          if (updated) {
+            setLinkedDeliveryOrders((prev) => prev.map((r) => (r.id === updated.id ? updated : r)))
+          }
+        }
+      } catch (e) {
+        console.error('Sync invoice to linked GRN/DO error:', e)
+      } finally {
+        syncGuardRef.current = false
+      }
+    },
+    [linkedGrns, linkedDeliveryOrders]
+  )
 
   const [highlightRowId, setHighlightRowId] = useState(null)
   useEffect(() => {
@@ -278,12 +385,22 @@ export default function InvoiceTrackingPage({ useAutocountStorage }) {
         ? { ...updates, statusUpdatedAt: new Date().toISOString() }
         : updates
     setInvoices((prev) => {
+      const prevRow = prev.find((r) => r.id === id)
+      if (updates.status !== undefined && prevRow && updates.status !== prevRow.status) {
+        recordStatusTransition(prevRow, updates.status, {
+          entityType: statusHistoryEntityType,
+          getDocumentNo: (r) => r.invoiceNo,
+        })
+      }
       const next = prev.map((row) => (row.id === id ? { ...row, ...withTimestamp } : row))
       const row = next.find((r) => r.id === id)
       if (!row) return next
       updateInvoice(id, row)
         .then((updated) => {
-          if (updated) setInvoices((p) => p.map((r) => (r.id === id ? updated : r)))
+          if (updated) {
+            setInvoices((p) => p.map((r) => (r.id === id ? updated : r)))
+            if (hasLinkedDocInInvoiceRemark(updated)) syncInvoiceToLinkedDoc(updated)
+          }
         })
         .catch((e) => console.error('Update invoice error:', e))
       return next
@@ -376,31 +493,22 @@ export default function InvoiceTrackingPage({ useAutocountStorage }) {
     )
   }
 
-  const handleDiscrepancyCheck = (rowId, checked) => {
-    if (checked) {
-      const row = invoices.find((r) => r.id === rowId)
-      updateRow(rowId, { discrepancy: { ...row.discrepancy, checked: true } })
-      setDiscrepancyModal({
-        open: true,
-        rowId,
-        title: row?.discrepancy?.title || '',
-        description: row?.discrepancy?.description || '',
-      })
-    } else {
-      updateRow(rowId, { discrepancy: defaultDiscrepancy() })
-    }
+  const closeAdditionalRemarkModal = () => {
+    setAdditionalRemarkModal({ open: false, rowId: null, remark: '' })
   }
 
-  const handleDiscrepancySave = (rowId, { title, description }) => {
-    updateRow(rowId, {
-      discrepancy: { checked: true, title, description },
+  const handleAdditionalRemarkOpen = (rowId) => {
+    const row = invoices.find((r) => r.id === rowId)
+    setAdditionalRemarkModal({
+      open: true,
+      rowId,
+      remark: getAdditionalRemarkText(row?.discrepancy),
     })
-    setDiscrepancyModal({ open: false, rowId: null, title: '', description: '' })
   }
 
-  const handleDiscrepancyCancel = (rowId) => {
-    updateRow(rowId, { discrepancy: defaultDiscrepancy() })
-    setDiscrepancyModal({ open: false, rowId: null, title: '', description: '' })
+  const handleAdditionalRemarkSave = (rowId, remark) => {
+    updateRow(rowId, { discrepancy: saveAdditionalRemark(remark) })
+    closeAdditionalRemarkModal()
   }
 
   const handleStatusChange = (rowId, newStatus, previousStatus) => {
@@ -483,29 +591,35 @@ export default function InvoiceTrackingPage({ useAutocountStorage }) {
       newStatus.startsWith('Hold -') || newStatus.startsWith('Chop & Sign -')
     const fromBilledToPhase2 = row.status === 'Billed' && newPhase === 2
     const remarkAtBilledUpdate = fromBilledToPhase2 ? { remarkAtBilled: row.remark ?? '' } : {}
+    const chopSignRemarkUpdate = leavingChopSignRemarkPayload(row.status, newStatus, row.remark)
     if (newStatus === 'Delivery In Progress') {
       updateRow(rowId, {
         status: newStatus,
         assignedSalesmanId: null,
         assignedDriverId: null,
         ...remarkAtBilledUpdate,
+        ...chopSignRemarkUpdate,
       })
       setPreparingDeliveryTypeModal({ open: true, rowId, previousStatus })
     } else if (STATUS_REQUIRES_SALESMAN.includes(newStatus)) {
-      updateRow(rowId, { status: newStatus, assignedDriverId: null, ...remarkAtBilledUpdate })
+      updateRow(rowId, { status: newStatus, assignedDriverId: null, ...remarkAtBilledUpdate, ...chopSignRemarkUpdate })
       setSalesmanModal({ open: true, rowId, previousStatus })
     } else if (STATUS_REQUIRES_CLERK.includes(newStatus)) {
-      updateRow(rowId, { status: newStatus, assignedDriverId: null, ...remarkAtBilledUpdate })
+      updateRow(rowId, { status: newStatus, assignedDriverId: null, ...remarkAtBilledUpdate, ...chopSignRemarkUpdate })
       setClerkModal({ open: true, rowId, previousStatus })
     } else if (newStatus === STATUS_TRANSFER) {
-      updateRow(rowId, { status: newStatus, ...remarkAtBilledUpdate })
+      updateRow(rowId, { status: newStatus, ...remarkAtBilledUpdate, ...chopSignRemarkUpdate })
       setWarehouseModal({ open: true, rowId, previousStatus })
     } else if (newStatus === 'Hold - Warehouse') {
-      updateRow(rowId, { status: newStatus, assignedDriverId: null, ...remarkAtBilledUpdate })
+      updateRow(rowId, { status: newStatus, assignedDriverId: null, ...remarkAtBilledUpdate, ...chopSignRemarkUpdate })
       setHoldWarehouseModal({ open: true, rowId, previousStatus })
     } else if (newStatus === 'Chop & Sign - Warehouse') {
       setChopSignWarehouseConfirmModal({ open: true, rowId, previousStatus })
       return
+    } else if (newStatus === 'Delivered') {
+      const payload = { status: newStatus, ...remarkAtBilledUpdate, ...chopSignRemarkUpdate }
+      updateRow(rowId, payload)
+      afterBulkableCommit(rowId, payload, () => {})
     } else {
       const payload = {
         status: newStatus,
@@ -514,6 +628,7 @@ export default function InvoiceTrackingPage({ useAutocountStorage }) {
         transferWarehouseId: null,
         ...(clearDriverForHoldOrChop ? { assignedDriverId: null } : {}),
         ...remarkAtBilledUpdate,
+        ...chopSignRemarkUpdate,
       }
       updateRow(rowId, payload)
       afterBulkableCommit(rowId, payload, () => {})
@@ -542,7 +657,7 @@ export default function InvoiceTrackingPage({ useAutocountStorage }) {
     updateRow(rowId, { assignedClerkId: clerkId })
     setClerkModal({ open: false, rowId: null, previousStatus: '' })
     const row = invoices.find((r) => r.id === rowId)
-    assignDatePendingRef.current = { rowId, fromDriver: false }
+    assignDatePendingRef.current = { rowId, fromDriver: false, clerkId }
     setAssignDateModal({
       open: true,
       rowId,
@@ -637,9 +752,8 @@ export default function InvoiceTrackingPage({ useAutocountStorage }) {
       remark: newRemark,
     }
     updateRow(rowId, payload)
-    afterBulkableCommit(rowId, payload, () =>
-      setHoldWarehouseTypeModal({ open: false, rowId: null, warehouseId: null, warehouseName: '', previousStatus: '' })
-    )
+    setHoldWarehouseTypeModal({ open: false, rowId: null, warehouseId: null, warehouseName: '', previousStatus: '' })
+    afterBulkableCommit(rowId, payload, () => {})
   }
 
   const handleHoldWarehouseTypeCancel = () => {
@@ -766,7 +880,12 @@ export default function InvoiceTrackingPage({ useAutocountStorage }) {
       holdWarehouseId: null,
       holdWarehouseType: '',
     }
-    const payload = { status: newStatus, ...resetPhase3Fields }
+    const row = invoices.find((r) => r.id === rowId)
+    const payload = {
+      status: newStatus,
+      ...resetPhase3Fields,
+      ...leavingChopSignRemarkPayload(previousStatus, newStatus, row?.remark),
+    }
     updateRow(rowId, payload)
     afterBulkableCommit(rowId, payload, () => {
       setPhase3ToOtherPhase2Modal({ open: false, rowId: null, newStatus: '', previousStatus: '' })
@@ -838,7 +957,11 @@ export default function InvoiceTrackingPage({ useAutocountStorage }) {
 
   const handleCompletedConfirmYes = () => {
     const { rowId } = completedConfirmModal
-    const payload = { status: 'Completed' }
+    const row = invoices.find((r) => r.id === rowId)
+    const payload = {
+      status: 'Completed',
+      ...leavingChopSignRemarkPayload(row?.status, 'Completed', row?.remark),
+    }
     if (rowId) updateRow(rowId, payload)
     afterBulkableCommit(rowId, payload, () => setCompletedConfirmModal({ open: false, rowId: null }))
   }
@@ -871,13 +994,73 @@ export default function InvoiceTrackingPage({ useAutocountStorage }) {
     setDriverModal({ open: true, rowId, previousStatus, fromChopSignWarehouse: true })
   }
 
+  const applyChopSignRemarkUpdate = (pending, removeSelfCollect) => {
+    const { rowIdToUse, dateToSave, fromChopSignNoFlow, fromChopSignWarehouse } = pending
+    const row = invoices.find((r) => r.id === rowIdToUse)
+    const newRemark = appendChopSignToRemark(row?.remark, { removeSelfCollect })
+    if (fromChopSignNoFlow) {
+      const { warehouseId } = fromChopSignNoFlow
+      const payload = {
+        status: 'Hold - Warehouse',
+        holdWarehouseId: warehouseId,
+        holdWarehouseType: removeSelfCollect ? '' : row?.holdWarehouseType ?? '',
+        assignedDriverId: null,
+        deliveryDate: dateToSave,
+        deliverySlot: '',
+        remark: newRemark,
+      }
+      updateRow(rowIdToUse, payload)
+      afterBulkableCommit(rowIdToUse, payload, () => {})
+    } else if (fromChopSignWarehouse) {
+      const payload = {
+        status: 'Delivery In Progress',
+        deliveryDate: dateToSave,
+        deliverySlot: '',
+        remark: newRemark,
+        ...(removeSelfCollect ? { holdWarehouseType: '' } : {}),
+      }
+      updateRow(rowIdToUse, payload)
+      afterBulkableCommit(rowIdToUse, payload, () => {})
+    }
+  }
+
+  const handleRemoveSelfCollectYes = () => {
+    const { pending } = removeSelfCollectModal
+    if (pending) applyChopSignRemarkUpdate(pending, true)
+    setRemoveSelfCollectModal({ open: false, pending: null })
+  }
+
+  const handleRemoveSelfCollectNo = () => {
+    const { pending } = removeSelfCollectModal
+    if (pending) applyChopSignRemarkUpdate(pending, false)
+    setRemoveSelfCollectModal({ open: false, pending: null })
+  }
+
   const handleAssignDateConfirm = () => {
     const ref = assignDatePendingRef.current
-    const { rowId: refRowId, fromDriver, fromChopSignWarehouse, fromChopSignNoFlow } = ref
+    const { rowId: refRowId, fromDriver, fromChopSignWarehouse, fromChopSignNoFlow, clerkId } = ref
     const rowIdToUse = refRowId ?? assignDateModal.rowId
     const dateStr = assignDateModal.selectedDate || getTodayDateStr()
     const parsed = parseDate(dateStr)
     const dateToSave = parsed || getTodayDateStr()
+
+    if (rowIdToUse && (fromChopSignNoFlow || fromChopSignWarehouse)) {
+      const row = invoices.find((r) => r.id === rowIdToUse)
+      if (hasSelfCollectInRemark(row?.remark)) {
+        setRemoveSelfCollectModal({
+          open: true,
+          pending: { rowIdToUse, dateToSave, fromChopSignNoFlow, fromChopSignWarehouse },
+        })
+        assignDatePendingRef.current = {
+          rowId: null,
+          fromDriver: false,
+          fromChopSignWarehouse: false,
+          fromChopSignNoFlow: null,
+        }
+        setAssignDateModal({ open: false, rowId: null, selectedDate: '', fromDriver: false })
+        return
+      }
+    }
 
     assignDatePendingRef.current = {
       rowId: null,
@@ -889,36 +1072,11 @@ export default function InvoiceTrackingPage({ useAutocountStorage }) {
 
     try {
       if (rowIdToUse) {
-        if (fromChopSignNoFlow) {
-          const { warehouseId } = fromChopSignNoFlow
-          const row = invoices.find((r) => r.id === rowIdToUse)
-          const currentRemark = row?.remark?.trim() || ''
-          const newRemark = currentRemark ? `${currentRemark} / Chop & Sign` : 'Chop & Sign'
-          const payload = {
-            status: 'Hold - Warehouse',
-            holdWarehouseId: warehouseId,
-            holdWarehouseType: '',
-            assignedDriverId: null,
-            deliveryDate: dateToSave,
-            deliverySlot: '',
-            remark: newRemark,
-          }
-          updateRow(rowIdToUse, payload)
-          afterBulkableCommit(rowIdToUse, payload, () => {})
-          return
-        }
-        if (fromChopSignWarehouse) {
-          const row = invoices.find((r) => r.id === rowIdToUse)
-          const currentRemark = row?.remark?.trim() || ''
-          const newRemark = currentRemark ? `${currentRemark} / Chop & Sign` : 'Chop & Sign'
-          const payload = {
-            status: 'Delivery In Progress',
-            deliveryDate: dateToSave,
-            deliverySlot: '',
-            remark: newRemark,
-          }
-          updateRow(rowIdToUse, payload)
-          afterBulkableCommit(rowIdToUse, payload, () => {})
+        if (fromChopSignNoFlow || fromChopSignWarehouse) {
+          applyChopSignRemarkUpdate(
+            { rowIdToUse, dateToSave, fromChopSignNoFlow, fromChopSignWarehouse },
+            false
+          )
           return
         }
         updateRow(rowIdToUse, { deliveryDate: dateToSave, deliverySlot: '' })
@@ -926,10 +1084,12 @@ export default function InvoiceTrackingPage({ useAutocountStorage }) {
           setDeliveryModal({ open: true, rowId: rowIdToUse, dateLabel: formatDate(dateToSave) })
         } else {
           const leadRow = invoices.find((r) => r.id === rowIdToUse)
+          const assignedClerkId = clerkId ?? leadRow?.assignedClerkId ?? null
           const payload = leadRow
             ? {
                 status: leadRow.status,
                 assignedSalesmanId: leadRow.assignedSalesmanId,
+                assignedClerkId,
                 assignedDriverId: leadRow.assignedDriverId,
                 deliveryDate: dateToSave,
                 deliverySlot: '',
@@ -988,17 +1148,251 @@ export default function InvoiceTrackingPage({ useAutocountStorage }) {
     setDriverModal({ open: false, rowId: null, previousStatus: '', fromChopSignWarehouse: false })
   }
 
-  const handleAddInvoiceRow = async () => {
-    const newRow = createInvoice({
-      invoiceNo: '',
-      dateOfInvoice: getTodayDateStr(),
-    })
-    try {
-      const inserted = await insertInvoice(newRow)
-      setInvoices((prev) => [...prev, inserted])
-    } catch (e) {
-      console.error('Add invoice row error:', e)
+  const handleAddInvoiceApplyDateToAllChange = (checked) => {
+    setAddInvoiceApplyDateToAll(checked)
+    if (checked) {
+      const firstDate = addInvoiceRows[0]?.dateOfInvoice || ''
+      setAddInvoiceRows((prev) => prev.map((r) => ({ ...r, dateOfInvoice: firstDate })))
     }
+  }
+
+  const handleAddInvoiceMultipleToggle = (on) => {
+    setAddInvoiceMultiple(on)
+    if (on) {
+      setAddInvoiceRows(Array(10).fill(null).map(() => emptyAddInvoiceRow()))
+      setAddInvoiceApplyDateToAll(false)
+    } else {
+      const first = addInvoiceRows[0] ? { ...addInvoiceRows[0] } : emptyAddInvoiceRow()
+      setAddInvoiceRows([first])
+      setAddInvoiceApplyDateToAll(false)
+    }
+  }
+
+  const setAddInvoiceRow = (index, field, value) => {
+    setAddInvoiceRows((prev) => {
+      let nextValue = value
+      if (field === 'digits') {
+        const maxLen = useAutocountStorage && addInvoiceKind === 'iv' ? IV_DIGIT_LEN : T_DIGIT_LEN
+        nextValue = normalizeDigits(value, maxLen)
+      }
+      const next = prev.map((r, i) => (i === index ? { ...r, [field]: nextValue } : r))
+      if (addInvoiceApplyDateToAll && field === 'dateOfInvoice' && index === 0) {
+        return next.map((r, i) => (i === 0 ? r : { ...r, dateOfInvoice: nextValue }))
+      }
+      return next
+    })
+  }
+
+  const getAddInvoiceEntries = () => {
+    const firstDate = addInvoiceApplyDateToAll ? (addInvoiceRows[0]?.dateOfInvoice || '') : null
+    return addInvoiceRows
+      .map((r) => {
+        const invoiceNo = useAutocountStorage
+          ? getAutocountInvoiceNo(addInvoiceKind, r.digits) || ''
+          : (r.invoiceNo || '').trim()
+        if (!invoiceNo) return null
+        return {
+          invoiceNo,
+          dateOfInvoice: addInvoiceApplyDateToAll ? firstDate : (r.dateOfInvoice || ''),
+          additionalRemark: (r.additionalRemark || '').trim(),
+        }
+      })
+      .filter(Boolean)
+  }
+
+  const handleAddInvoiceProceed = () => {
+    const rowsWithData = useAutocountStorage
+      ? addInvoiceRows.filter((r) => normalizeDigits(r.digits, addInvoiceKind === 'iv' ? IV_DIGIT_LEN : T_DIGIT_LEN).length > 0)
+      : addInvoiceRows.filter((r) => (r.invoiceNo || '').trim())
+    if (rowsWithData.length === 0) return
+    if (useAutocountStorage) {
+      for (const r of rowsWithData) {
+        if (!getAutocountInvoiceNo(addInvoiceKind, r.digits)) return
+      }
+    }
+    const entries = getAddInvoiceEntries()
+    if (entries.length === 0) return
+    if (addInvoiceApplyDateToAll && !addInvoiceRows[0]?.dateOfInvoice) return
+    for (const e of entries) {
+      if (!addInvoiceApplyDateToAll && !e.dateOfInvoice) return
+    }
+    setAddInvoiceConfirmError('')
+    setAddInvoiceConfirmOpen(true)
+  }
+
+  const openAddInvoiceForm = (kind = 'iv') => {
+    setAddInvoiceKind(kind)
+    setAddInvoiceFormOpen(true)
+    setAddInvoiceConfirmOpen(false)
+    setAddInvoiceRows(
+      addInvoiceMultiple ? Array(10).fill(null).map(() => emptyAddInvoiceRow()) : [emptyAddInvoiceRow()]
+    )
+    setAddInvoiceApplyDateToAll(false)
+  }
+
+  const getInvoiceRowDisplay = (row) => {
+    const clerk = row.assignedClerkId ? employees.find((e) => e.id === row.assignedClerkId) : null
+    const salesman = row.assignedSalesmanId ? salesmen.find((s) => s.id === row.assignedSalesmanId) : null
+    const driver = row.assignedDriverId ? drivers.find((d) => d.id === row.assignedDriverId) : null
+    const transferWarehouse = row.transferWarehouseId ? warehouses.find((w) => w.id === row.transferWarehouseId) : null
+    const holdWarehouse = row.holdWarehouseId ? warehouses.find((w) => w.id === row.holdWarehouseId) : null
+    const assignedTo =
+      row.status === 'Preparing Delivery' || row.status === 'Billed'
+        ? 'Unassigned'
+        : row.status === STATUS_TRANSFER && transferWarehouse
+          ? transferWarehouse.name
+          : row.status === 'Hold - Warehouse' && holdWarehouse
+            ? holdWarehouse.name || 'Unassigned'
+            : STATUS_REQUIRES_CLERK.includes(row.status)
+              ? clerk?.name ?? 'Unassigned'
+              : STATUS_REQUIRES_SALESMAN.includes(row.status)
+                ? salesman?.name ?? 'Unassigned'
+                : row.status === 'Delivery In Progress' || row.status === 'Delivered' || row.status === 'Completed'
+                  ? salesman?.name ?? driver?.name ?? 'Unassigned'
+                  : driver?.name ?? 'Unassigned'
+    const assignedDate =
+      row.deliveryDate && row.deliverySlot
+        ? `${formatDate(row.deliveryDate)} - ${row.deliverySlot}`
+        : row.deliveryDate
+          ? formatDate(row.deliveryDate)
+          : '–'
+    return { status: row.status, assignedTo, assignedDate }
+  }
+
+  const formatAddInvoiceError = (err) => {
+    const msg = err?.message || String(err)
+    if (/row-level security|permission denied|42501/i.test(msg)) {
+      return 'Could not save invoice: the database blocked this action. If using online Supabase, run supabase/remote-policies-backup.sql in the SQL Editor.'
+    }
+    return msg || 'Could not save invoice.'
+  }
+
+  const insertNewInvoiceEntries = async (entries) => {
+    const insertedRows = []
+    for (const e of entries) {
+      const discrepancy = useAutocountStorage
+        ? buildAutocountAdditionalRemark(addInvoiceKind, e.additionalRemark)
+        : saveAdditionalRemark(e.additionalRemark)
+      const newRow = createInvoice({
+        invoiceNo: e.invoiceNo,
+        dateOfInvoice: e.dateOfInvoice,
+        discrepancy,
+      })
+      const inserted = await insertInvoice(newRow)
+      recordInitialStatus({
+        entityType: statusHistoryEntityType,
+        entityId: inserted.id,
+        documentNo: inserted.invoiceNo,
+        status: inserted.status || 'Billed',
+        statusAt: inserted.statusUpdatedAt,
+      })
+      insertedRows.push(inserted)
+    }
+    if (insertedRows.length > 0) {
+      setInvoices((prev) => [...prev, ...insertedRows])
+    }
+  }
+
+  const closeAddInvoiceFlow = () => {
+    setAddInvoiceFormOpen(false)
+    setAddInvoiceConfirmOpen(false)
+    setAddInvoiceConfirmError('')
+    setAddInvoiceConfirmSaving(false)
+    setAddInvoiceRows([emptyAddInvoiceRow()])
+    setAddInvoiceApplyDateToAll(false)
+  }
+
+  const handleAddInvoiceConfirmYes = async () => {
+    if (addInvoiceConfirmSaving) return
+    setAddInvoiceConfirmError('')
+    const entries = getAddInvoiceEntries()
+    const conflicts = []
+    const nonConflicting = []
+    for (const e of entries) {
+      const existing = invoices.find((r) => (r.invoiceNo || '').trim() === (e.invoiceNo || '').trim())
+      if (existing) conflicts.push({ existingRow: existing, newEntry: e })
+      else nonConflicting.push(e)
+    }
+    if (conflicts.length > 0) {
+      setAddInvoiceConfirmOpen(false)
+      setAddInvoiceConfirmError('')
+      setOverwriteInvoiceModal({ open: true, conflicts, nonConflicting, index: 0 })
+      return
+    }
+    setAddInvoiceConfirmSaving(true)
+    try {
+      await insertNewInvoiceEntries(nonConflicting)
+      closeAddInvoiceFlow()
+    } catch (err) {
+      console.error('Failed to add invoice(s):', err)
+      setAddInvoiceConfirmError(formatAddInvoiceError(err))
+    } finally {
+      setAddInvoiceConfirmSaving(false)
+    }
+  }
+
+  const handleOverwriteInvoiceYes = async () => {
+    const { conflicts, nonConflicting, index } = overwriteInvoiceModal
+    const { existingRow, newEntry } = conflicts[index]
+    const resetPayload = {
+      invoiceNo: newEntry.invoiceNo,
+      dateOfInvoice: newEntry.dateOfInvoice,
+      status: 'Billed',
+      assignedDriverId: null,
+      assignedSalesmanId: null,
+      assignedClerkId: null,
+      deliveryDate: '',
+      deliverySlot: '',
+      transferWarehouseId: null,
+      holdWarehouseId: null,
+      holdWarehouseType: '',
+    }
+    try {
+      await updateInvoice(existingRow.id, resetPayload)
+      setInvoices((prev) =>
+        prev.map((r) => (r.id === existingRow.id ? { ...r, ...resetPayload } : r))
+      )
+      if (index + 1 < conflicts.length) {
+        setOverwriteInvoiceModal((prev) => ({ ...prev, index: prev.index + 1 }))
+      } else {
+        await insertNewInvoiceEntries(nonConflicting)
+        setOverwriteInvoiceModal({ open: false, conflicts: [], nonConflicting: [], index: 0 })
+        closeAddInvoiceFlow()
+      }
+    } catch (err) {
+      console.error('Failed to overwrite invoice:', err)
+      setAddInvoiceConfirmError(formatAddInvoiceError(err))
+      setOverwriteInvoiceModal({ open: false, conflicts: [], nonConflicting: [], index: 0 })
+      setAddInvoiceConfirmOpen(true)
+    }
+  }
+
+  const handleOverwriteInvoiceNo = async () => {
+    const { conflicts, nonConflicting, index } = overwriteInvoiceModal
+    if (index + 1 < conflicts.length) {
+      setOverwriteInvoiceModal((prev) => ({ ...prev, index: prev.index + 1 }))
+      return
+    }
+    try {
+      await insertNewInvoiceEntries(nonConflicting)
+      setOverwriteInvoiceModal({ open: false, conflicts: [], nonConflicting: [], index: 0 })
+      closeAddInvoiceFlow()
+    } catch (err) {
+      console.error('Failed to add invoice(s):', err)
+      setAddInvoiceConfirmError(formatAddInvoiceError(err))
+      setOverwriteInvoiceModal({ open: false, conflicts: [], nonConflicting: [], index: 0 })
+      setAddInvoiceConfirmOpen(true)
+    }
+  }
+
+  const handleAddInvoiceConfirmNo = () => {
+    setAddInvoiceConfirmOpen(false)
+    setAddInvoiceConfirmError('')
+  }
+
+  const handleAddInvoiceFormClose = () => {
+    setOverwriteInvoiceModal({ open: false, conflicts: [], nonConflicting: [], index: 0 })
+    closeAddInvoiceFlow()
   }
 
   return (
@@ -1007,7 +1401,8 @@ export default function InvoiceTrackingPage({ useAutocountStorage }) {
         {pageTitle}
       </h1>
       <div className="flex items-center justify-between gap-4 flex-wrap">
-        <div className="flex items-center gap-2 min-w-0">
+        <div className="flex items-center gap-4 flex-wrap min-w-0">
+          <div className="flex items-center gap-2 min-w-0">
           <label htmlFor="invoice-no-search" className="text-sm font-medium text-slate-700 shrink-0">
             Invoice No.
           </label>
@@ -1020,27 +1415,48 @@ export default function InvoiceTrackingPage({ useAutocountStorage }) {
             className="py-2 px-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-900 focus:border-blue-900 w-48 max-w-full text-sm"
             aria-label="Search by invoice number"
           />
+          </div>
+          <TrackingMonthFilter
+            id="invoice-month-filter"
+            availableMonths={availableMonths}
+            value={selectedMonth}
+            onChange={setSelectedMonth}
+          />
         </div>
-        <div className="flex items-center gap-4 shrink-0">
-        {canUseTestMode && (
-          <button
-            type="button"
-            onClick={handleAddInvoiceRow}
-            className="inline-flex items-center gap-2 px-4 py-2 bg-blue-900 text-white rounded-lg hover:bg-blue-800 text-sm font-medium"
-          >
-            <Plus size={18} />
-            Add row
-          </button>
-        )}
+        <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
+          <RefreshListButton onRefresh={loadInvoices} loading={invoicesLoading} label="Refresh invoice list" />
+          {useAutocountStorage ? (
+            <>
+              <button type="button" onClick={() => openAddInvoiceForm('iv')} className="inline-flex items-center gap-2 px-4 py-2 bg-blue-900 text-white rounded-lg hover:bg-blue-800 text-sm font-medium">
+                <Plus size={18} /> Add IV Invoice
+              </button>
+              <button type="button" onClick={() => openAddInvoiceForm('fn-t')} className="inline-flex items-center gap-2 px-4 py-2 bg-blue-900 text-white rounded-lg hover:bg-blue-800 text-sm font-medium">
+                <Plus size={18} /> Add F&N T Invoice
+              </button>
+              <button type="button" onClick={() => openAddInvoiceForm('heineken-t')} className="inline-flex items-center gap-2 px-4 py-2 bg-blue-900 text-white rounded-lg hover:bg-blue-800 text-sm font-medium">
+                <Plus size={18} /> Add Heineken T Invoice
+              </button>
+            </>
+          ) : (
+            <button type="button" onClick={() => openAddInvoiceForm('iv')} className="inline-flex items-center gap-2 px-4 py-2 bg-blue-900 text-white rounded-lg hover:bg-blue-800 text-sm font-medium">
+              <Plus size={18} /> Add New Invoice
+            </button>
+          )}
         </div>
       </div>
 
       <div className="bg-white rounded-lg shadow border border-slate-200 overflow-x-auto">
         {invoicesLoading ? (
           <div className="p-8 text-center text-slate-500">Loading invoices…</div>
-        ) : filteredInvoices.length === 0 ? (
+        ) : filteredInvoiceCount === 0 ? (
           <div className="p-8 text-center text-slate-500">
-            {invoiceSearchQuery.trim() ? 'No invoices match your search.' : 'No invoices added yet. Click &quot;Add row&quot; (Test Mode) to add one.'}
+            {invoiceSearchQuery.trim()
+              ? 'No invoices match your search.'
+              : selectedMonth
+                ? `No invoices for ${formatMonthLabel(selectedMonth)}.`
+                : useAutocountStorage
+                  ? 'No invoices added yet. Click "Add IV Invoice" to add one.'
+                  : 'No invoices added yet. Click "Add New Invoice" to add one.'}
           </div>
         ) : (
         <table className="w-full min-w-[900px] text-sm">
@@ -1067,12 +1483,12 @@ export default function InvoiceTrackingPage({ useAutocountStorage }) {
               <th className="text-left py-3 px-4 font-semibold text-slate-700">Assigned Date</th>
               <th className="text-left py-3 px-4 font-semibold text-slate-700">Remark</th>
               <th className="text-left py-3 px-4 font-semibold text-slate-700 w-16">C.O.D</th>
-              <th className="text-left py-3 px-4 font-semibold text-slate-700">Discrepancy</th>
+              <th className="text-left py-3 px-4 font-semibold text-slate-700">Additional Remark</th>
               {canUseTestMode && <th className="text-left py-3 px-4 font-semibold text-slate-700 w-14">Delete</th>}
             </tr>
           </thead>
           <tbody>
-            {filteredInvoices.map((row) => {
+            {pagedInvoices.map((row) => {
               const salesman = row.assignedSalesmanId
                 ? salesmen.find((s) => s.id === row.assignedSalesmanId)
                 : null
@@ -1119,12 +1535,12 @@ export default function InvoiceTrackingPage({ useAutocountStorage }) {
               const showAssignedPerson =
                 (STATUS_REQUIRES_CLERK.includes(row.status) && clerk) ||
                 (STATUS_REQUIRES_SALESMAN.includes(row.status) && salesman) ||
-                (row.status === 'Delivery In Progress' && (salesman || assignedDriver))
+                (STATUS_SHOWS_DELIVERY_ASSIGNEE.includes(row.status) && (salesman || assignedDriver))
               const assignedPersonName = STATUS_REQUIRES_CLERK.includes(row.status)
                 ? (clerk?.name ?? '')
                 : STATUS_REQUIRES_SALESMAN.includes(row.status)
                   ? (salesman?.name ?? '')
-                  : row.status === 'Delivery In Progress'
+                  : STATUS_SHOWS_DELIVERY_ASSIGNEE.includes(row.status)
                     ? (salesman?.name ?? assignedDriver?.name ?? '')
                     : ''
               const assignedToDisplay =
@@ -1137,12 +1553,17 @@ export default function InvoiceTrackingPage({ useAutocountStorage }) {
                       : showAssignedPerson
                         ? assignedPersonName
                         : (assignedDriver?.name ?? 'Unassigned')
+              const canReassignAssignee =
+                !isCompletedLocked &&
+                assignedToDisplay !== 'Unassigned' &&
+                (assignedToDisplay === salesman?.name || assignedToDisplay === assignedDriver?.name)
               const assignedDateDisplay =
                 row.deliveryDate && row.deliverySlot
                   ? `${formatDate(row.deliveryDate)} - ${row.deliverySlot}`
                   : row.deliveryDate
                     ? formatDate(row.deliveryDate)
                     : '–'
+              const canReassignDate = !isCompletedLocked && assignedDateDisplay !== '–' && !!row.deliveryDate
               const isAssignedDateReadOnlyClerkSalesman =
                 STATUS_REQUIRES_CLERK.includes(row.status) ||
                 STATUS_REQUIRES_SALESMAN.includes(row.status) ||
@@ -1186,8 +1607,8 @@ export default function InvoiceTrackingPage({ useAutocountStorage }) {
                       aria-label={`Select invoice ${row.invoiceNo || row.id}`}
                     />
                   </td>
-                  <td className="py-2 px-4 w-12 text-center" title={isStatusOverdue(row) ? `Status "${row.status}" has exceeded the allowed duration (Phase ${getPhase(row.status)})` : ''}>
-                    {isStatusOverdue(row) ? (
+                  <td className="py-2 px-4 w-12 text-center" title={isStatusOverdue(row, alertSettings) ? `Status "${row.status}" has exceeded the allowed duration (Phase ${getPhase(row.status)})` : ''}>
+                    {isStatusOverdue(row, alertSettings) ? (
                       <AlertTriangle size={20} className="text-amber-500 inline-block" aria-label="Status overdue" />
                     ) : (
                       <span className="text-slate-300" aria-hidden>–</span>
@@ -1263,34 +1684,56 @@ export default function InvoiceTrackingPage({ useAutocountStorage }) {
                     )}
                   </td>
                   <td className="py-2 px-4">
-                    <span
-                      className={`py-1.5 px-2 block min-w-[140px] ${
-                        assignedToDisplay === 'Unassigned' ? 'text-slate-500' : 'text-slate-700'
-                      }`}
-                    >
-                      {assignedToDisplay}
-                    </span>
-                  </td>
-                  <td className="py-2 px-4">
-                    <span
-                      className="py-1.5 px-2 block min-w-[140px] text-slate-700"
-                    >
-                      {assignedDateDisplay}
-                    </span>
-                  </td>
-                  <td className="py-2 px-4">
-                    <input
-                      type="text"
-                      value={row.remark}
-                      onChange={(e) => updateRow(row.id, { remark: e.target.value })}
-                      readOnly={!canEditRow}
-                      className={`w-full min-w-[100px] py-1.5 px-2 border rounded ${
-                        canEditRow
-                          ? 'border-slate-300 focus:ring-2 focus:ring-blue-900'
-                          : 'border-transparent bg-transparent read-only:bg-transparent'
-                      }`}
-                      placeholder="Remark"
+                    <AssignedToCell
+                      name={assignedToDisplay}
+                      showReassign={canReassignAssignee}
+                      onReassign={() =>
+                        setReassignModal({
+                          open: true,
+                          rowId: row.id,
+                          currentName: assignedToDisplay,
+                        })
+                      }
                     />
+                  </td>
+                  <td className="py-2 px-4">
+                    <AssignedToCell
+                      name={assignedDateDisplay}
+                      showReassign={canReassignDate}
+                      reassignLabel="Reassign date"
+                      onReassign={() =>
+                        setReassignDateModal({
+                          open: true,
+                          rowId: row.id,
+                          currentLabel: assignedDateDisplay,
+                          initialDate: row.deliveryDate || '',
+                          initialSlot: row.deliverySlot || '',
+                        })
+                      }
+                    />
+                  </td>
+                  <td className="py-2 px-4">
+                    {hasLinkedDocInInvoiceRemark(row) ? (
+                      <LinkedTrackingRemark
+                        remark={row.remark}
+                        grnLookup={grnLookup}
+                        doLookup={doLookup}
+                        className="py-1.5 px-2 block min-w-[100px]"
+                      />
+                    ) : (
+                      <input
+                        type="text"
+                        value={row.remark}
+                        onChange={(e) => updateRow(row.id, { remark: e.target.value })}
+                        readOnly={!canEditRow}
+                        className={`w-full min-w-[100px] py-1.5 px-2 border rounded ${
+                          canEditRow
+                            ? 'border-slate-300 focus:ring-2 focus:ring-blue-900'
+                            : 'border-transparent bg-transparent read-only:bg-transparent'
+                        }`}
+                        placeholder="Remark"
+                      />
+                    )}
                   </td>
                   <td className="py-2 px-4">
                     <input
@@ -1303,76 +1746,11 @@ export default function InvoiceTrackingPage({ useAutocountStorage }) {
                     />
                   </td>
                   <td className="py-2 px-4">
-                    <div className="flex items-center gap-2">
-                      {isCompletedLocked ? (
-                        <>
-                          <input
-                            type="checkbox"
-                            checked={row.discrepancy?.checked ?? false}
-                            disabled
-                            className="rounded border-slate-300 text-blue-900 opacity-70 cursor-not-allowed"
-                          />
-                          {row.discrepancy?.checked && row.discrepancy?.title ? (
-                            <span
-                              className="relative group/tip max-w-[120px] truncate text-slate-700"
-                              title={row.discrepancy?.description}
-                            >
-                              {row.discrepancy.title}
-                              {row.discrepancy.description && (
-                                <span className="absolute left-0 bottom-full mb-1 hidden group-hover/tip:block z-10 py-2 px-3 bg-slate-800 text-white text-xs rounded shadow-lg max-w-[220px] whitespace-normal">
-                                  {row.discrepancy.description}
-                                </span>
-                              )}
-                            </span>
-                          ) : row.discrepancy?.checked ? (
-                            <span className="text-slate-500 text-xs">No details</span>
-                          ) : null}
-                        </>
-                      ) : row.discrepancy?.checked ? (
-                        <>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setDiscrepancyModal({
-                                open: true,
-                                rowId: row.id,
-                                title: row.discrepancy?.title || '',
-                                description: row.discrepancy?.description || '',
-                              })
-                            }
-                            className="p-1.5 rounded text-slate-600 hover:bg-slate-100"
-                            title="Edit discrepancy"
-                            aria-label="Edit discrepancy"
-                          >
-                            <Pencil size={18} />
-                          </button>
-                          {row.discrepancy?.title ? (
-                            <span
-                              className="relative group/tip max-w-[120px] truncate text-slate-700"
-                              title={row.discrepancy?.description}
-                            >
-                              {row.discrepancy.title}
-                              {row.discrepancy.description && (
-                                <span className="absolute left-0 bottom-full mb-1 hidden group-hover/tip:block z-10 py-2 px-3 bg-slate-800 text-white text-xs rounded shadow-lg max-w-[220px] whitespace-normal">
-                                  {row.discrepancy.description}
-                                </span>
-                              )}
-                            </span>
-                          ) : (
-                            <span className="text-slate-500 text-xs">No details</span>
-                          )}
-                        </>
-                      ) : (
-                        <>
-                          <input
-                            type="checkbox"
-                            checked={false}
-                            onChange={(e) => e.target.checked && handleDiscrepancyCheck(row.id, true)}
-                            className="rounded border-slate-300 text-blue-900 focus:ring-blue-900"
-                          />
-                        </>
-                      )}
-                    </div>
+                    <AdditionalRemarkCell
+                      discrepancy={row.discrepancy}
+                      canEdit={!isCompletedLocked}
+                      onEdit={() => handleAdditionalRemarkOpen(row.id)}
+                    />
                   </td>
                   {canUseTestMode && !isCompletedLocked && (
                     <td className="py-2 px-4">
@@ -1392,7 +1770,231 @@ export default function InvoiceTrackingPage({ useAutocountStorage }) {
           </tbody>
         </table>
         )}
+        {!invoicesLoading && filteredInvoiceCount > 0 && (
+          <TrackingPagination
+            currentPage={currentPage}
+            totalPages={totalPages}
+            totalItems={filteredInvoiceCount}
+            onPageChange={goToPage}
+          />
+        )}
       </div>
+
+      {/* Add New Invoice - Form */}
+      {addInvoiceFormOpen && !addInvoiceConfirmOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50">
+          <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-auto p-6" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-lg font-semibold text-slate-800 mb-4">{getAddInvoiceFormTitle(addInvoiceKind, useAutocountStorage)}</h3>
+            <label className="flex items-center gap-2 mb-4 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={addInvoiceMultiple}
+                onChange={(e) => handleAddInvoiceMultipleToggle(e.target.checked)}
+                className="rounded border-slate-300 text-blue-900 focus:ring-blue-900"
+              />
+              <span className="text-sm text-slate-700">Add In Multiple</span>
+            </label>
+            {!addInvoiceMultiple ? (
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Invoice No</label>
+                  {useAutocountStorage ? (
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-semibold text-slate-600 shrink-0">
+                        {addInvoiceKind === 'iv' ? IV_PREFIX : T_PREFIX}
+                      </span>
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        maxLength={addInvoiceKind === 'iv' ? IV_DIGIT_LEN : T_DIGIT_LEN}
+                        value={addInvoiceRows[0]?.digits || ''}
+                        onChange={(e) => setAddInvoiceRow(0, 'digits', e.target.value)}
+                        className="flex-1 py-2 px-3 border border-slate-300 rounded focus:ring-2 focus:ring-blue-900 font-mono"
+                        placeholder={addInvoiceKind === 'iv' ? '10 digits' : '5 digits'}
+                      />
+                    </div>
+                  ) : (
+                    <input
+                      type="text"
+                      value={addInvoiceRows[0]?.invoiceNo || ''}
+                      onChange={(e) => setAddInvoiceRow(0, 'invoiceNo', e.target.value)}
+                      className="w-full py-2 px-3 border border-slate-300 rounded focus:ring-2 focus:ring-blue-900"
+                    />
+                  )}
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Invoice Date</label>
+                  <input
+                    type="date"
+                    value={addInvoiceRows[0]?.dateOfInvoice || ''}
+                    onChange={(e) => setAddInvoiceRow(0, 'dateOfInvoice', e.target.value)}
+                    className="w-full py-2 px-3 border border-slate-300 rounded focus:ring-2 focus:ring-blue-900"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Additional Remark</label>
+                  <input
+                    type="text"
+                    value={addInvoiceRows[0]?.additionalRemark || ''}
+                    onChange={(e) => setAddInvoiceRow(0, 'additionalRemark', e.target.value)}
+                    className="w-full py-2 px-3 border border-slate-300 rounded focus:ring-2 focus:ring-blue-900"
+                    placeholder="Optional"
+                  />
+                </div>
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm border border-slate-200">
+                  <thead>
+                    <tr className="bg-slate-100">
+                      <th className="text-left py-2 px-3 font-semibold text-slate-700">Invoice No</th>
+                      <th className="text-left py-2 px-3 font-semibold text-slate-700">Invoice Date</th>
+                      <th className="text-left py-2 px-3 font-semibold text-slate-700">Additional Remark</th>
+                      <th className="text-left py-2 px-3 font-semibold text-slate-700 w-28">
+                        <label className="flex items-center gap-1 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={addInvoiceApplyDateToAll}
+                            onChange={(e) => handleAddInvoiceApplyDateToAllChange(e.target.checked)}
+                            className="rounded border-slate-300 text-blue-900 focus:ring-blue-900"
+                          />
+                          Apply To All
+                        </label>
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {addInvoiceRows.map((row, i) => (
+                      <tr key={i} className="border-t border-slate-200">
+                        <td className="py-2 px-3">
+                          {useAutocountStorage ? (
+                            <div className="flex items-center gap-1">
+                              <span className="text-xs font-semibold text-slate-600 shrink-0">
+                                {addInvoiceKind === 'iv' ? IV_PREFIX : T_PREFIX}
+                              </span>
+                              <input
+                                type="text"
+                                inputMode="numeric"
+                                maxLength={addInvoiceKind === 'iv' ? IV_DIGIT_LEN : T_DIGIT_LEN}
+                                value={row.digits}
+                                onChange={(e) => setAddInvoiceRow(i, 'digits', e.target.value)}
+                                className="w-full py-1.5 px-2 border border-slate-300 rounded text-sm font-mono"
+                              />
+                            </div>
+                          ) : (
+                            <input
+                              type="text"
+                              value={row.invoiceNo}
+                              onChange={(e) => setAddInvoiceRow(i, 'invoiceNo', e.target.value)}
+                              className="w-full py-1.5 px-2 border border-slate-300 rounded text-sm"
+                            />
+                          )}
+                        </td>
+                        <td className="py-2 px-3">
+                          <input
+                            type="date"
+                            value={addInvoiceApplyDateToAll ? (addInvoiceRows[0]?.dateOfInvoice || '') : row.dateOfInvoice}
+                            onChange={(e) => setAddInvoiceRow(i, 'dateOfInvoice', e.target.value)}
+                            disabled={addInvoiceApplyDateToAll && i > 0}
+                            className={`w-full py-1.5 px-2 border rounded text-sm ${addInvoiceApplyDateToAll && i > 0 ? 'bg-slate-100 border-slate-200' : 'border-slate-300'}`}
+                          />
+                        </td>
+                        <td className="py-2 px-3">
+                          <input
+                            type="text"
+                            value={row.additionalRemark || ''}
+                            onChange={(e) => setAddInvoiceRow(i, 'additionalRemark', e.target.value)}
+                            className="w-full py-1.5 px-2 border border-slate-300 rounded text-sm"
+                            placeholder="Optional"
+                          />
+                        </td>
+                        <td className="py-2 px-3" />
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            <div className="flex justify-end gap-2 mt-6">
+              <button type="button" onClick={handleAddInvoiceFormClose} className="px-4 py-2 border border-slate-300 rounded-lg hover:bg-slate-50">Cancel</button>
+              <button type="button" onClick={handleAddInvoiceProceed} className="px-4 py-2 bg-blue-900 text-white rounded-lg hover:bg-blue-800">Done</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Add New Invoice - Confirm */}
+      {addInvoiceFormOpen && addInvoiceConfirmOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50" onClick={handleAddInvoiceConfirmNo}>
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full max-h-[90vh] overflow-auto p-6" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-lg font-semibold text-slate-800 mb-2">Confirm new invoices</h3>
+            <p className="text-slate-600 text-sm mb-4">Please confirm the following. Is all correct?</p>
+            <ul className="border border-slate-200 rounded-lg divide-y divide-slate-200 mb-6 max-h-60 overflow-y-auto">
+              {getAddInvoiceEntries().map((e, i) => (
+                <li key={i} className="py-2 px-3 flex justify-between text-sm">
+                  <span className="font-medium text-slate-800">{e.invoiceNo}</span>
+                  <span className="text-slate-600">{e.dateOfInvoice ? formatDate(e.dateOfInvoice) : '–'}</span>
+                </li>
+              ))}
+            </ul>
+            {addInvoiceConfirmError && (
+              <p className="text-sm text-red-600 mb-4" role="alert">{addInvoiceConfirmError}</p>
+            )}
+            <div className="flex justify-end gap-2">
+              <button type="button" onClick={handleAddInvoiceConfirmNo} disabled={addInvoiceConfirmSaving} className="px-4 py-2 border border-slate-300 rounded-lg hover:bg-slate-50 disabled:opacity-50">No</button>
+              <button type="button" onClick={handleAddInvoiceConfirmYes} disabled={addInvoiceConfirmSaving} className="px-4 py-2 bg-blue-900 text-white rounded-lg hover:bg-blue-800 disabled:opacity-50">
+                {addInvoiceConfirmSaving ? 'Saving…' : 'Yes'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Overwrite existing Invoice */}
+      {overwriteInvoiceModal.open && overwriteInvoiceModal.conflicts[overwriteInvoiceModal.index] && (() => {
+        const { existingRow, newEntry } = overwriteInvoiceModal.conflicts[overwriteInvoiceModal.index]
+        const existingDisplay = getInvoiceRowDisplay(existingRow)
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50" onClick={() => handleOverwriteInvoiceNo()}>
+            <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-auto p-6" onClick={(e) => e.stopPropagation()}>
+              <h3 className="text-lg font-semibold text-slate-800 mb-2">Invoice already exists</h3>
+              <p className="text-slate-600 text-sm mb-4">
+                <strong>{newEntry.invoiceNo}</strong> already exists. Do you want to overwrite it? Once overwrite, you may lose the progress of the existing invoice.
+              </p>
+              <div className="grid grid-cols-2 gap-4 mb-6">
+                <div className="border border-slate-200 rounded-lg p-3 bg-slate-50">
+                  <p className="text-xs font-semibold text-slate-500 uppercase mb-2">Existing</p>
+                  <table className="text-sm w-full">
+                    <tbody>
+                      <tr><td className="text-slate-500 py-1 pr-2">Invoice No</td><td className="font-medium">{existingRow.invoiceNo || '–'}</td></tr>
+                      <tr><td className="text-slate-500 py-1 pr-2">Invoice Date</td><td>{existingRow.dateOfInvoice ? formatDate(existingRow.dateOfInvoice) : '–'}</td></tr>
+                      <tr><td className="text-slate-500 py-1 pr-2">Status</td><td>{existingDisplay.status}</td></tr>
+                      <tr><td className="text-slate-500 py-1 pr-2">Assigned To</td><td>{existingDisplay.assignedTo}</td></tr>
+                      <tr><td className="text-slate-500 py-1 pr-2">Assigned Date</td><td>{existingDisplay.assignedDate}</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div className="border border-slate-200 rounded-lg p-3 bg-blue-50/50">
+                  <p className="text-xs font-semibold text-slate-500 uppercase mb-2">New</p>
+                  <table className="text-sm w-full">
+                    <tbody>
+                      <tr><td className="text-slate-500 py-1 pr-2">Invoice No</td><td className="font-medium">{newEntry.invoiceNo || '–'}</td></tr>
+                      <tr><td className="text-slate-500 py-1 pr-2">Invoice Date</td><td>{newEntry.dateOfInvoice ? formatDate(newEntry.dateOfInvoice) : '–'}</td></tr>
+                      <tr><td className="text-slate-500 py-1 pr-2">Status</td><td>Billed</td></tr>
+                      <tr><td className="text-slate-500 py-1 pr-2">Assigned To</td><td>–</td></tr>
+                      <tr><td className="text-slate-500 py-1 pr-2">Assigned Date</td><td>–</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+              <div className="flex justify-end gap-2">
+                <button type="button" onClick={handleOverwriteInvoiceNo} className="px-4 py-2 border border-slate-300 rounded-lg hover:bg-slate-50">No</button>
+                <button type="button" onClick={handleOverwriteInvoiceYes} className="px-4 py-2 bg-blue-900 text-white rounded-lg hover:bg-blue-800">Yes</button>
+              </div>
+            </div>
+          </div>
+        )
+      })()}
 
       <DeliverySlotModal
         isOpen={deliveryModal.open}
@@ -1401,22 +2003,13 @@ export default function InvoiceTrackingPage({ useAutocountStorage }) {
         onSelect={handleDeliverySlotSelect}
       />
 
-      <DiscrepancyModal
-        isOpen={discrepancyModal.open}
-        initialTitle={discrepancyModal.title}
-        initialDesc={discrepancyModal.description}
-        onClose={() => {
-          if (discrepancyModal.rowId) handleDiscrepancyCancel(discrepancyModal.rowId)
-          setDiscrepancyModal({ open: false, rowId: null, title: '', description: '' })
-        }}
-        onSave={({ title, description }) =>
-          discrepancyModal.rowId &&
-          handleDiscrepancySave(discrepancyModal.rowId, { title, description })
-        }
-        onRemove={
-          discrepancyModal.rowId
-            ? () => handleDiscrepancyCancel(discrepancyModal.rowId)
-            : undefined
+      <AdditionalRemarkModal
+        isOpen={additionalRemarkModal.open}
+        initialRemark={additionalRemarkModal.remark}
+        onClose={closeAdditionalRemarkModal}
+        onSave={(remark) =>
+          additionalRemarkModal.rowId &&
+          handleAdditionalRemarkSave(additionalRemarkModal.rowId, remark)
         }
       />
 
@@ -1458,6 +2051,7 @@ export default function InvoiceTrackingPage({ useAutocountStorage }) {
 
       <SelectWarehouseModal
         isOpen={holdWarehouseModal.open}
+        ownOnly
         rowId={holdWarehouseModal.rowId}
         previousStatus={holdWarehouseModal.previousStatus}
         onClose={handleHoldWarehouseModalCancel}
@@ -1466,6 +2060,7 @@ export default function InvoiceTrackingPage({ useAutocountStorage }) {
 
       <SelectWarehouseModal
         isOpen={chopSignNoWarehouseModal.open}
+        ownOnly
         rowId={chopSignNoWarehouseModal.rowId}
         previousStatus={chopSignNoWarehouseModal.previousStatus}
         onClose={handleChopSignNoWarehouseCancel}
@@ -1526,6 +2121,34 @@ export default function InvoiceTrackingPage({ useAutocountStorage }) {
             : setDriverModal({ open: false, rowId: null, previousStatus: '' })
         }
         onSelect={handleDriverSelect}
+      />
+
+      <ReassignAssigneeModal
+        isOpen={reassignModal.open}
+        currentName={reassignModal.currentName}
+        onClose={() => setReassignModal({ open: false, rowId: null, currentName: '' })}
+        onConfirm={({ type, personId }) => {
+          if (reassignModal.rowId) {
+            updateRow(reassignModal.rowId, reassignAssigneeUpdates(type, personId))
+          }
+          setReassignModal({ open: false, rowId: null, currentName: '' })
+        }}
+      />
+
+      <ReassignAssignedDateModal
+        isOpen={reassignDateModal.open}
+        currentLabel={reassignDateModal.currentLabel}
+        initialDate={reassignDateModal.initialDate}
+        initialSlot={reassignDateModal.initialSlot}
+        onClose={() =>
+          setReassignDateModal({ open: false, rowId: null, currentLabel: '', initialDate: '', initialSlot: '' })
+        }
+        onConfirm={({ date, slot }) => {
+          if (reassignDateModal.rowId) {
+            updateRow(reassignDateModal.rowId, reassignDateUpdates(date, slot))
+          }
+          setReassignDateModal({ open: false, rowId: null, currentLabel: '', initialDate: '', initialSlot: '' })
+        }}
       />
 
       <NoticeModal
@@ -1669,6 +2292,12 @@ export default function InvoiceTrackingPage({ useAutocountStorage }) {
           </div>
         </div>
       )}
+
+      <RemoveSelfCollectModal
+        isOpen={removeSelfCollectModal.open}
+        onYes={handleRemoveSelfCollectYes}
+        onNo={handleRemoveSelfCollectNo}
+      />
 
       {chopSignWarehouseConfirmModal.open && (
         <div

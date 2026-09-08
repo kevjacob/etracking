@@ -8,16 +8,46 @@ import { useWarehouses } from '../context/WarehousesContext'
 import { formatDate, toInputDate, parseDate } from '../utils/dateFormat'
 import { sortBySerial } from '../utils/serialSort'
 import { fetchGRNs, insertGRN, updateGRN, deleteGRN } from '../api/grn'
+import { fetchGRCs, updateGRC } from '../api/grc'
 import { fetchInvoices, updateInvoice } from '../api/invoices'
+import { fetchInvoices as fetchAutocountInvoices, updateInvoice as updateAutocountInvoice } from '../api/autocountInvoices'
+import InvoiceAttachmentSearch from '../components/InvoiceAttachmentSearch'
 import DeliveryTimeAndAttachmentModal from '../components/DeliveryTimeAndAttachmentModal'
-import DiscrepancyModal from '../components/DiscrepancyModal'
+import AdditionalRemarkModal from '../components/AdditionalRemarkModal'
+import AdditionalRemarkCell from '../components/AdditionalRemarkCell'
 import SelectSalesmanModal from '../components/SelectSalesmanModal'
 import SelectClerkModal from '../components/SelectClerkModal'
 import SelectWarehouseModal from '../components/SelectWarehouseModal'
 import HoldWarehouseTypeModal from '../components/HoldWarehouseTypeModal'
+import RemoveSelfCollectModal from '../components/RemoveSelfCollectModal'
 import SelectDriverModal from '../components/SelectDriverModal'
+import AssignedToCell from '../components/AssignedToCell'
+import ReassignAssigneeModal, { reassignAssigneeUpdates } from '../components/ReassignAssigneeModal'
+import ReassignAssignedDateModal, { reassignDateUpdates } from '../components/ReassignAssignedDateModal'
 import NoticeModal from '../components/NoticeModal'
+import RefreshListButton from '../components/RefreshListButton'
+import TrackingMonthFilter from '../components/TrackingMonthFilter'
+import TrackingPagination from '../components/TrackingPagination'
 import { useRealtimeTable } from '../hooks/useRealtimeTable'
+import { useTrackingListView } from '../hooks/useTrackingListView'
+import { formatMonthLabel } from '../utils/trackingListFilters'
+import { appendChopSignToRemark, hasSelfCollectInRemark, leavingChopSignRemarkPayload } from '../utils/remarkUtils'
+import { isStatusOverdue } from '../utils/alertStatus'
+import { recordStatusTransition, recordInitialStatus } from '../utils/recordStatusTransition'
+import { useAlertSettings } from '../context/AlertSettingsContext'
+import LinkedTrackingRemark from '../components/LinkedTrackingRemark'
+import { buildDocNoLookup, mergeLinkedSync, resolveLinkedGrc, hasLinkedGrc, formatGrnNo, normalizeDigits, DO_DIGIT_LEN, GRN_NO_PREFIX } from '../utils/grcGrnSync'
+import {
+  buildCombinedInvoiceLookup,
+  buildInvoiceUpdateForDocLink,
+  buildRemarkWithLinkedInvoice,
+  hasLinkedInvoice,
+  resolveLinkedInvoice,
+} from '../utils/invoiceLinkSync'
+
+function emptyAddGrnRow() {
+  return { grnDigits: '', grnDate: '', additionalRemark: '', attachmentQuery: '', attachmentInvoice: null }
+}
 
 function getTodayDateStr() {
   const d = new Date()
@@ -68,6 +98,7 @@ const PHASE_2 = [
 const PHASE_3 = ['Delivery In Progress']
 const PHASE_4 = ['Delivered']
 const PHASE_5 = ['Completed', 'Cancelled']
+const STATUS_SHOWS_DELIVERY_ASSIGNEE = ['Delivery In Progress', 'Delivered', 'Completed']
 
 function getPhase(status) {
   if (PHASE_1.includes(status)) return 1
@@ -78,32 +109,11 @@ function getPhase(status) {
   return 1
 }
 
-function getStatusMaxDays(status) {
-  if (status === 'Cancelled') return 999
-  if (PHASE_1.includes(status)) return 1
-  if (status === 'Preparing Delivery') return 3
-  if (PHASE_2.includes(status)) return 4
-  if (PHASE_3.includes(status)) return 1.5
-  if (PHASE_4.includes(status)) return 1
-  if (PHASE_5.includes(status)) return 1
-  return 1
-}
-
-function isStatusOverdue(row) {
-  const updatedAt = row?.statusUpdatedAt
-  if (!updatedAt) return false
-  const updated = new Date(updatedAt).getTime()
-  const now = Date.now()
-  const maxDays = getStatusMaxDays(row.status)
-  const maxMs = maxDays * 24 * 60 * 60 * 1000
-  return now - updated > maxMs
-}
-
 const DELIVERED_VALIDATION_MSG = 'Assigned person and date is missing, please go to preparing delivery.'
 const DELIVERY_IN_PROGRESS_VALIDATION_MSG = 'Driver and Delivery date yet to be assigned.'
 const PHASE_4_LOCKED_MSG = 'This Status can no longer be changed as the order has been completed.'
 
-const defaultDiscrepancy = () => ({ checked: false, title: '', description: '' })
+import { defaultAdditionalRemark, getAdditionalRemarkText, saveAdditionalRemark } from '../utils/additionalRemark'
 
 function createGRN(overrides = {}) {
   return {
@@ -123,13 +133,15 @@ function createGRN(overrides = {}) {
     deliverySlot: '',
     remark: '',
     remarkAtBilled: '', // kept when backtracking from Phase 2 to Billed
-    discrepancy: defaultDiscrepancy(),
+    discrepancy: defaultAdditionalRemark(),
+    linkedGrcId: null,
     ...overrides,
   }
 }
 
 export default function GRNTrackingPage() {
   const { isSuperuser } = useAuth()
+  const { settings: alertSettings } = useAlertSettings()
   const { testMode } = useTestMode()
   const { employees } = useEmployees()
   const { warehouses } = useWarehouses()
@@ -137,10 +149,14 @@ export default function GRNTrackingPage() {
   const salesmen = employees.filter((e) => e.position === 'Salesman')
   const canUseTestMode = testMode && isSuperuser
   const [grns, setGrns] = useState([])
+  const [grcs, setGrcs] = useState([])
+  const [esdInvoicesList, setEsdInvoicesList] = useState([])
+  const [autocountInvoicesList, setAutocountInvoicesList] = useState([])
   const [grnsLoading, setGrnsLoading] = useState(true)
   const [addGRNFormOpen, setAddGRNFormOpen] = useState(false)
   const [addGRNMultiple, setAddGRNMultiple] = useState(false)
-  const [addGRNRows, setAddGRNRows] = useState([{ grnNo: '', grnDate: '' }])
+  const [addGRNRows, setAddGRNRows] = useState([emptyAddGrnRow()])
+  const [addGRNFormError, setAddGRNFormError] = useState('')
   const [addGRNApplyDateToAll, setAddGRNApplyDateToAll] = useState(false)
   const [addGRNConfirmOpen, setAddGRNConfirmOpen] = useState(false)
   const [overwriteGRNModal, setOverwriteGRNModal] = useState({
@@ -150,15 +166,22 @@ export default function GRNTrackingPage() {
     index: 0,
   })
   const [deliveryModal, setDeliveryModal] = useState({ open: false, rowId: null, dateLabel: '', skipTimeStep: false })
-  const [discrepancyModal, setDiscrepancyModal] = useState({
+  const [additionalRemarkModal, setAdditionalRemarkModal] = useState({
     open: false,
     rowId: null,
-    title: '',
-    description: '',
+    remark: '',
   })
   const [datePickerRow, setDatePickerRow] = useState(null)
   const [grnDatePickerRow, setGRNDatePickerRow] = useState(null)
   const [salesmanModal, setSalesmanModal] = useState({ open: false, rowId: null, previousStatus: '' })
+  const [reassignModal, setReassignModal] = useState({ open: false, rowId: null, currentName: '' })
+  const [reassignDateModal, setReassignDateModal] = useState({
+    open: false,
+    rowId: null,
+    currentLabel: '',
+    initialDate: '',
+    initialSlot: '',
+  })
   const [clerkModal, setClerkModal] = useState({ open: false, rowId: null, previousStatus: '' })
   const [warehouseModal, setWarehouseModal] = useState({ open: false, rowId: null, previousStatus: '' })
   const [holdWarehouseModal, setHoldWarehouseModal] = useState({ open: false, rowId: null, previousStatus: '' })
@@ -204,6 +227,10 @@ export default function GRNTrackingPage() {
     rowId: null,
     previousStatus: '',
   })
+  const [removeSelfCollectModal, setRemoveSelfCollectModal] = useState({
+    open: false,
+    pending: null,
+  })
   const [phase4LockedNoticeOpen, setPhase4LockedNoticeOpen] = useState(false)
   const [backtrackPhase2To1Modal, setBacktrackPhase2To1Modal] = useState({ open: false, rowId: null })
   const [backtrackPhase3To1Modal, setBacktrackPhase3To1Modal] = useState({ open: false, rowId: null })
@@ -237,15 +264,27 @@ export default function GRNTrackingPage() {
   const [invoiceSearchList, setInvoiceSearchList] = useState([])
   const [invoiceAttachedNotice, setInvoiceAttachedNotice] = useState({ open: false, message: '' })
   const [grnSearchQuery, setGrnSearchQuery] = useState('')
-  const filteredGRNs = useMemo(() => {
-    const q = (grnSearchQuery || '').trim().toLowerCase()
-    const list = !q
-      ? grns
-      : grns.filter((row) =>
-          (row.grnNo || '').toLowerCase().includes(q)
-        )
-    return sortBySerial(list, (row) => row.grnNo)
-  }, [grns, grnSearchQuery])
+  const getGrnDate = useCallback((row) => row.grnDate, [])
+  const getGrnSearch = useCallback((row) => row.grnNo, [])
+  const sortGrns = useCallback((list) => sortBySerial(list, (row) => row.grnNo), [])
+  const {
+    availableMonths,
+    selectedMonth,
+    setSelectedMonth,
+    filteredRows: filteredGRNs,
+    pageRows: pagedGRNs,
+    currentPage,
+    totalPages,
+    totalItems: filteredGrnCount,
+    goToPage,
+  } = useTrackingListView({
+    pageKey: 'grn',
+    rows: grns,
+    searchQuery: grnSearchQuery,
+    getDateField: getGrnDate,
+    getSearchField: getGrnSearch,
+    sortRows: sortGrns,
+  })
   const assignDatePendingRef = useRef({
     rowId: null,
     fromDriver: false,
@@ -270,7 +309,83 @@ export default function GRNTrackingPage() {
     loadGRNs()
   }, [loadGRNs])
 
+  const loadGrcs = useCallback(async () => {
+    try {
+      const data = await fetchGRCs()
+      setGrcs(Array.isArray(data) ? data : [])
+    } catch (e) {
+      console.error('Fetch GRC for GRN link error:', e)
+      setGrcs([])
+    }
+  }, [])
+
+  useEffect(() => {
+    loadGrcs()
+  }, [loadGrcs])
+
+  useEffect(() => {
+    fetchInvoices()
+      .then((list) => setEsdInvoicesList(Array.isArray(list) ? list : []))
+      .catch((e) => {
+        console.error('Fetch ESD invoices for GRN link error:', e)
+        setEsdInvoicesList([])
+      })
+    fetchAutocountInvoices()
+      .then((list) => setAutocountInvoicesList(Array.isArray(list) ? list : []))
+      .catch((e) => {
+        console.error('Fetch Autocount invoices for GRN link error:', e)
+        setAutocountInvoicesList([])
+      })
+  }, [])
+
   useRealtimeTable('grn', setGrns)
+  useRealtimeTable('grc', setGrcs)
+
+  const grcLookup = useMemo(() => buildDocNoLookup(grcs, 'grcNo'), [grcs])
+  const grnLookup = useMemo(() => buildDocNoLookup(grns, 'grnNo'), [grns])
+  const invoiceLookup = useMemo(
+    () => buildCombinedInvoiceLookup(esdInvoicesList, autocountInvoicesList),
+    [esdInvoicesList, autocountInvoicesList]
+  )
+  const syncGuardRef = useRef(false)
+
+  const syncGrnToLinkedInvoice = useCallback(
+    async (grnRow) => {
+      if (syncGuardRef.current) return
+      const linked = resolveLinkedInvoice(grnRow, esdInvoicesList, autocountInvoicesList)
+      if (!linked) return
+      syncGuardRef.current = true
+      try {
+        const payload = buildInvoiceUpdateForDocLink(linked, grnRow, grnRow.grnNo)
+        const updateApi = linked._linkType === 'autocount' ? updateAutocountInvoice : updateInvoice
+        await updateApi(linked.id, payload)
+      } catch (e) {
+        console.error('Sync GRN to linked invoice error:', e)
+      } finally {
+        syncGuardRef.current = false
+      }
+    },
+    [esdInvoicesList, autocountInvoicesList]
+  )
+
+  const syncGrnToLinkedGrc = useCallback(
+    async (grnRow) => {
+      if (syncGuardRef.current) return
+      const grcRow = resolveLinkedGrc(grnRow, grcs)
+      if (!grcRow) return
+      syncGuardRef.current = true
+      try {
+        const merged = mergeLinkedSync(grcRow, grnRow)
+        const updated = await updateGRC(grcRow.id, merged)
+        if (updated) setGrcs((prev) => prev.map((r) => (r.id === updated.id ? updated : r)))
+      } catch (e) {
+        console.error('Sync GRN to GRC error:', e)
+      } finally {
+        syncGuardRef.current = false
+      }
+    },
+    [grcs]
+  )
 
   const [highlightRowId, setHighlightRowId] = useState(null)
   useEffect(() => {
@@ -292,12 +407,23 @@ export default function GRNTrackingPage() {
         ? { ...updates, statusUpdatedAt: new Date().toISOString() }
         : updates
     setGrns((prev) => {
+      const prevRow = prev.find((r) => r.id === id)
+      if (updates.status !== undefined && prevRow && updates.status !== prevRow.status) {
+        recordStatusTransition(prevRow, updates.status, {
+          entityType: 'grn',
+          getDocumentNo: (r) => r.grnNo,
+        })
+      }
       const next = prev.map((row) => (row.id === id ? { ...row, ...withTimestamp } : row))
       const row = next.find((r) => r.id === id)
       if (!row) return next
       updateGRN(id, row)
         .then((updated) => {
-          if (updated) setGrns((p) => p.map((r) => (r.id === id ? updated : r)))
+            if (updated) {
+            setGrns((p) => p.map((r) => (r.id === id ? updated : r)))
+            if (hasLinkedGrc(updated, grcs)) syncGrnToLinkedGrc(updated)
+            if (hasLinkedInvoice(updated)) syncGrnToLinkedInvoice(updated)
+          }
         })
         .catch((e) => console.error('Update GRN error:', e))
       return next
@@ -463,31 +589,22 @@ export default function GRNTrackingPage() {
     setInvoiceSearchSelectedId(null)
   }
 
-  const handleDiscrepancyCheck = (rowId, checked) => {
-    if (checked) {
-      const row = grns.find((r) => r.id === rowId)
-      updateRow(rowId, { discrepancy: { ...row.discrepancy, checked: true } })
-      setDiscrepancyModal({
-        open: true,
-        rowId,
-        title: row?.discrepancy?.title || '',
-        description: row?.discrepancy?.description || '',
-      })
-    } else {
-      updateRow(rowId, { discrepancy: defaultDiscrepancy() })
-    }
+  const closeAdditionalRemarkModal = () => {
+    setAdditionalRemarkModal({ open: false, rowId: null, remark: '' })
   }
 
-  const handleDiscrepancySave = (rowId, { title, description }) => {
-    updateRow(rowId, {
-      discrepancy: { checked: true, title, description },
+  const handleAdditionalRemarkOpen = (rowId) => {
+    const row = grns.find((r) => r.id === rowId)
+    setAdditionalRemarkModal({
+      open: true,
+      rowId,
+      remark: getAdditionalRemarkText(row?.discrepancy),
     })
-    setDiscrepancyModal({ open: false, rowId: null, title: '', description: '' })
   }
 
-  const handleDiscrepancyCancel = (rowId) => {
-    updateRow(rowId, { discrepancy: defaultDiscrepancy() })
-    setDiscrepancyModal({ open: false, rowId: null, title: '', description: '' })
+  const handleAdditionalRemarkSave = (rowId, remark) => {
+    updateRow(rowId, { discrepancy: saveAdditionalRemark(remark) })
+    closeAdditionalRemarkModal()
   }
 
   const handleStatusChange = (rowId, newStatus, previousStatus) => {
@@ -570,29 +687,35 @@ export default function GRNTrackingPage() {
       newStatus.startsWith('Hold -') || newStatus.startsWith('Chop & Sign -')
     const fromBilledToPhase2 = row.status === 'Billed' && newPhase === 2
     const remarkAtBilledUpdate = fromBilledToPhase2 ? { remarkAtBilled: row.remark ?? '' } : {}
+    const chopSignRemarkUpdate = leavingChopSignRemarkPayload(row.status, newStatus, row.remark)
     if (newStatus === 'Delivery In Progress') {
       updateRow(rowId, {
         status: newStatus,
         assignedSalesmanId: null,
         assignedDriverId: null,
         ...remarkAtBilledUpdate,
+        ...chopSignRemarkUpdate,
       })
       setPreparingDeliveryTypeModal({ open: true, rowId, previousStatus })
     } else if (STATUS_REQUIRES_SALESMAN.includes(newStatus)) {
-      updateRow(rowId, { status: newStatus, assignedDriverId: null, ...remarkAtBilledUpdate })
+      updateRow(rowId, { status: newStatus, assignedDriverId: null, ...remarkAtBilledUpdate, ...chopSignRemarkUpdate })
       setSalesmanModal({ open: true, rowId, previousStatus })
     } else if (STATUS_REQUIRES_CLERK.includes(newStatus)) {
-      updateRow(rowId, { status: newStatus, assignedDriverId: null, ...remarkAtBilledUpdate })
+      updateRow(rowId, { status: newStatus, assignedDriverId: null, ...remarkAtBilledUpdate, ...chopSignRemarkUpdate })
       setClerkModal({ open: true, rowId, previousStatus })
     } else if (newStatus === STATUS_TRANSFER) {
-      updateRow(rowId, { status: newStatus, ...remarkAtBilledUpdate })
+      updateRow(rowId, { status: newStatus, ...remarkAtBilledUpdate, ...chopSignRemarkUpdate })
       setWarehouseModal({ open: true, rowId, previousStatus })
     } else if (newStatus === 'Hold - Warehouse') {
-      updateRow(rowId, { status: newStatus, assignedDriverId: null, ...remarkAtBilledUpdate })
+      updateRow(rowId, { status: newStatus, assignedDriverId: null, ...remarkAtBilledUpdate, ...chopSignRemarkUpdate })
       setHoldWarehouseModal({ open: true, rowId, previousStatus })
     } else if (newStatus === 'Chop & Sign - Warehouse') {
       setChopSignWarehouseConfirmModal({ open: true, rowId, previousStatus })
       return
+    } else if (newStatus === 'Delivered') {
+      const payload = { status: newStatus, ...remarkAtBilledUpdate, ...chopSignRemarkUpdate }
+      updateRow(rowId, payload)
+      afterBulkableCommit(rowId, payload, () => {})
     } else {
       const payload = {
         status: newStatus,
@@ -601,6 +724,7 @@ export default function GRNTrackingPage() {
         transferWarehouseId: null,
         ...(clearDriverForHoldOrChop ? { assignedDriverId: null } : {}),
         ...remarkAtBilledUpdate,
+        ...chopSignRemarkUpdate,
       }
       updateRow(rowId, payload)
       afterBulkableCommit(rowId, payload, () => {})
@@ -629,7 +753,7 @@ export default function GRNTrackingPage() {
     updateRow(rowId, { assignedClerkId: clerkId })
     setClerkModal({ open: false, rowId: null, previousStatus: '' })
     const row = grns.find((r) => r.id === rowId)
-    assignDatePendingRef.current = { rowId, fromDriver: false }
+    assignDatePendingRef.current = { rowId, fromDriver: false, clerkId }
     setAssignDateModal({
       open: true,
       rowId,
@@ -724,9 +848,8 @@ export default function GRNTrackingPage() {
       remark: newRemark,
     }
     updateRow(rowId, payload)
-    afterBulkableCommit(rowId, payload, () =>
-      setHoldWarehouseTypeModal({ open: false, rowId: null, warehouseId: null, warehouseName: '', previousStatus: '' })
-    )
+    setHoldWarehouseTypeModal({ open: false, rowId: null, warehouseId: null, warehouseName: '', previousStatus: '' })
+    afterBulkableCommit(rowId, payload, () => {})
   }
 
   const handleHoldWarehouseTypeCancel = () => {
@@ -853,7 +976,12 @@ export default function GRNTrackingPage() {
       holdWarehouseId: null,
       holdWarehouseType: '',
     }
-    const payload = { status: newStatus, ...resetPhase3Fields }
+    const row = grns.find((r) => r.id === rowId)
+    const payload = {
+      status: newStatus,
+      ...resetPhase3Fields,
+      ...leavingChopSignRemarkPayload(previousStatus, newStatus, row?.remark),
+    }
     updateRow(rowId, payload)
     afterBulkableCommit(rowId, payload, () => {
       setPhase3ToOtherPhase2Modal({ open: false, rowId: null, newStatus: '', previousStatus: '' })
@@ -925,7 +1053,11 @@ export default function GRNTrackingPage() {
 
   const handleCompletedConfirmYes = () => {
     const { rowId } = completedConfirmModal
-    const payload = { status: 'Completed' }
+    const row = grns.find((r) => r.id === rowId)
+    const payload = {
+      status: 'Completed',
+      ...leavingChopSignRemarkPayload(row?.status, 'Completed', row?.remark),
+    }
     if (rowId) updateRow(rowId, payload)
     afterBulkableCommit(rowId, payload, () => setCompletedConfirmModal({ open: false, rowId: null }))
   }
@@ -958,13 +1090,73 @@ export default function GRNTrackingPage() {
     setDriverModal({ open: true, rowId, previousStatus, fromChopSignWarehouse: true })
   }
 
+  const applyChopSignRemarkUpdate = (pending, removeSelfCollect) => {
+    const { rowIdToUse, dateToSave, fromChopSignNoFlow, fromChopSignWarehouse } = pending
+    const row = grns.find((r) => r.id === rowIdToUse)
+    const newRemark = appendChopSignToRemark(row?.remark, { removeSelfCollect })
+    if (fromChopSignNoFlow) {
+      const { warehouseId } = fromChopSignNoFlow
+      const payload = {
+        status: 'Hold - Warehouse',
+        holdWarehouseId: warehouseId,
+        holdWarehouseType: removeSelfCollect ? '' : row?.holdWarehouseType ?? '',
+        assignedDriverId: null,
+        deliveryDate: dateToSave,
+        deliverySlot: '',
+        remark: newRemark,
+      }
+      updateRow(rowIdToUse, payload)
+      afterBulkableCommit(rowIdToUse, payload, () => {})
+    } else if (fromChopSignWarehouse) {
+      const payload = {
+        status: 'Delivery In Progress',
+        deliveryDate: dateToSave,
+        deliverySlot: '',
+        remark: newRemark,
+        ...(removeSelfCollect ? { holdWarehouseType: '' } : {}),
+      }
+      updateRow(rowIdToUse, payload)
+      afterBulkableCommit(rowIdToUse, payload, () => {})
+    }
+  }
+
+  const handleRemoveSelfCollectYes = () => {
+    const { pending } = removeSelfCollectModal
+    if (pending) applyChopSignRemarkUpdate(pending, true)
+    setRemoveSelfCollectModal({ open: false, pending: null })
+  }
+
+  const handleRemoveSelfCollectNo = () => {
+    const { pending } = removeSelfCollectModal
+    if (pending) applyChopSignRemarkUpdate(pending, false)
+    setRemoveSelfCollectModal({ open: false, pending: null })
+  }
+
   const handleAssignDateConfirm = () => {
     const ref = assignDatePendingRef.current
-    const { rowId: refRowId, fromDriver, fromChopSignWarehouse, fromChopSignNoFlow } = ref
+    const { rowId: refRowId, fromDriver, fromChopSignWarehouse, fromChopSignNoFlow, clerkId } = ref
     const rowIdToUse = refRowId ?? assignDateModal.rowId
     const dateStr = assignDateModal.selectedDate || getTodayDateStr()
     const parsed = parseDate(dateStr)
     const dateToSave = parsed || getTodayDateStr()
+
+    if (rowIdToUse && (fromChopSignNoFlow || fromChopSignWarehouse)) {
+      const row = grns.find((r) => r.id === rowIdToUse)
+      if (hasSelfCollectInRemark(row?.remark)) {
+        setRemoveSelfCollectModal({
+          open: true,
+          pending: { rowIdToUse, dateToSave, fromChopSignNoFlow, fromChopSignWarehouse },
+        })
+        assignDatePendingRef.current = {
+          rowId: null,
+          fromDriver: false,
+          fromChopSignWarehouse: false,
+          fromChopSignNoFlow: null,
+        }
+        setAssignDateModal({ open: false, rowId: null, selectedDate: '', fromDriver: false })
+        return
+      }
+    }
 
     assignDatePendingRef.current = {
       rowId: null,
@@ -976,36 +1168,11 @@ export default function GRNTrackingPage() {
 
     try {
       if (rowIdToUse) {
-        if (fromChopSignNoFlow) {
-          const { warehouseId } = fromChopSignNoFlow
-          const row = grns.find((r) => r.id === rowIdToUse)
-          const currentRemark = row?.remark?.trim() || ''
-          const newRemark = currentRemark ? `${currentRemark} / Chop & Sign` : 'Chop & Sign'
-          const payload = {
-            status: 'Hold - Warehouse',
-            holdWarehouseId: warehouseId,
-            holdWarehouseType: '',
-            assignedDriverId: null,
-            deliveryDate: dateToSave,
-            deliverySlot: '',
-            remark: newRemark,
-          }
-          updateRow(rowIdToUse, payload)
-          afterBulkableCommit(rowIdToUse, payload, () => {})
-          return
-        }
-        if (fromChopSignWarehouse) {
-          const row = grns.find((r) => r.id === rowIdToUse)
-          const currentRemark = row?.remark?.trim() || ''
-          const newRemark = currentRemark ? `${currentRemark} / Chop & Sign` : 'Chop & Sign'
-          const payload = {
-            status: 'Delivery In Progress',
-            deliveryDate: dateToSave,
-            deliverySlot: '',
-            remark: newRemark,
-          }
-          updateRow(rowIdToUse, payload)
-          afterBulkableCommit(rowIdToUse, payload, () => {})
+        if (fromChopSignNoFlow || fromChopSignWarehouse) {
+          applyChopSignRemarkUpdate(
+            { rowIdToUse, dateToSave, fromChopSignNoFlow, fromChopSignWarehouse },
+            false
+          )
           return
         }
         updateRow(rowIdToUse, { deliveryDate: dateToSave, deliverySlot: '' })
@@ -1013,10 +1180,12 @@ export default function GRNTrackingPage() {
           setDeliveryModal({ open: true, rowId: rowIdToUse, dateLabel: formatDate(dateToSave), skipTimeStep: false })
         } else {
           const leadRow = grns.find((r) => r.id === rowIdToUse)
+          const assignedClerkId = clerkId ?? leadRow?.assignedClerkId ?? null
           const payload = leadRow
             ? {
                 status: leadRow.status,
                 assignedSalesmanId: leadRow.assignedSalesmanId,
+                assignedClerkId,
                 assignedDriverId: leadRow.assignedDriverId,
                 deliveryDate: dateToSave,
                 deliverySlot: '',
@@ -1077,26 +1246,30 @@ export default function GRNTrackingPage() {
   }
 
   const handleAddGRNApplyDateToAllChange = (checked) => {
-    setAddDeliveryOrderApplyDateToAll(checked)
+    setAddGRNApplyDateToAll(checked)
     if (checked) {
       const firstDate = addGRNRows[0]?.grnDate || ''
       setAddGRNRows((prev) => prev.map((r) => ({ ...r, grnDate: firstDate })))
     }
   }
   const handleAddGRNMultipleToggle = (on) => {
-    setAddDeliveryOrderMultiple(on)
+    setAddGRNMultiple(on)
     if (on) {
-      const newRows = Array(10).fill(null).map(() => ({ grnNo: '', grnDate: '' }))
+      const newRows = Array(10).fill(null).map(() => emptyAddGrnRow())
       setAddGRNRows(newRows)
-      setAddDeliveryOrderApplyDateToAll(false)
+      setAddGRNApplyDateToAll(false)
     } else {
-      const first = addGRNRows[0] ? { ...addGRNRows[0] } : { grnNo: '', grnDate: '' }
+      const first = addGRNRows[0] ? { ...addGRNRows[0] } : emptyAddGrnRow()
       setAddGRNRows([first])
-      setAddDeliveryOrderApplyDateToAll(false)
+      setAddGRNApplyDateToAll(false)
     }
   }
 
   const setAddGRNRow = (index, field, value) => {
+    setAddGRNFormError('')
+    if (field === 'grnDigits') {
+      value = normalizeDigits(value, DO_DIGIT_LEN)
+    }
     setAddGRNRows((prev) => {
       const next = prev.map((r, i) => (i === index ? { ...r, [field]: value } : r))
       if (addGRNApplyDateToAll && field === 'grnDate' && index === 0) {
@@ -1109,21 +1282,69 @@ export default function GRNTrackingPage() {
   const getAddGRNEntries = () => {
     const firstDate = addGRNApplyDateToAll ? (addGRNRows[0]?.grnDate || '') : null
     return addGRNRows
-      .map((r) => ({
-        grnNo: r.grnNo?.trim(),
-        grnDate: addGRNApplyDateToAll ? firstDate : (r.grnDate || ''),
-      }))
-      .filter((e) => e.grnNo)
+      .map((r) => {
+        const grnNo = formatGrnNo(r.grnDigits)
+        if (!grnNo) return null
+        return {
+          grnNo,
+          grnDate: addGRNApplyDateToAll ? firstDate : (r.grnDate || ''),
+          additionalRemark: (r.additionalRemark || '').trim(),
+          attachmentInvoice: r.attachmentInvoice || null,
+        }
+      })
+      .filter(Boolean)
+  }
+
+  const linkGrnToInvoice = async (grnRow, attachmentInvoice) => {
+    if (!attachmentInvoice?.invoiceNo) return
+    const linked = resolveLinkedInvoice(
+      { remark: buildRemarkWithLinkedInvoice(attachmentInvoice.invoiceNo, '') },
+      esdInvoicesList,
+      autocountInvoicesList
+    ) || attachmentInvoice
+    const payload = buildInvoiceUpdateForDocLink(linked, grnRow, grnRow.grnNo)
+    const updateApi = attachmentInvoice._source === 'autocount' ? updateAutocountInvoice : updateInvoice
+    await updateApi(attachmentInvoice.id, payload)
+  }
+
+  const persistNewGrn = async (entry) => {
+    const remark = buildRemarkWithLinkedInvoice(entry.attachmentInvoice?.invoiceNo, '')
+    const discrepancy = saveAdditionalRemark(entry.additionalRemark)
+    const newRow = createGRN({ grnNo: entry.grnNo, grnDate: entry.grnDate, remark, discrepancy })
+    const inserted = await insertGRN(newRow)
+    recordInitialStatus({
+      entityType: 'grn',
+      entityId: inserted.id,
+      documentNo: inserted.grnNo,
+      status: inserted.status || 'Billed',
+      statusAt: inserted.statusUpdatedAt,
+    })
+    if (entry.attachmentInvoice) {
+      await linkGrnToInvoice(inserted, entry.attachmentInvoice)
+    }
+    return inserted
   }
 
   const handleAddGRNProceed = () => {
+    setAddGRNFormError('')
+    const rowsWithDigits = addGRNRows.filter((r) => normalizeDigits(r.grnDigits, DO_DIGIT_LEN).length > 0)
+    if (rowsWithDigits.length === 0) {
+      setAddGRNFormError('Enter at least one GRN number (5 digits).')
+      return
+    }
+    for (const r of rowsWithDigits) {
+      if (!formatGrnNo(r.grnDigits)) {
+        setAddGRNFormError('Each GRN number must be exactly 5 digits.')
+        return
+      }
+    }
     const entries = getAddGRNEntries()
     if (entries.length === 0) return
     if (addGRNApplyDateToAll && !addGRNRows[0]?.grnDate) return
     for (const e of entries) {
       if (!addGRNApplyDateToAll && !e.grnDate) return
     }
-    setAddDeliveryOrderConfirmOpen(true)
+    setAddGRNConfirmOpen(true)
   }
 
   const handleAddGRNConfirmYes = async () => {
@@ -1136,19 +1357,18 @@ export default function GRNTrackingPage() {
       else nonConflicting.push(e)
     }
     if (conflicts.length > 0) {
-      setAddDeliveryOrderConfirmOpen(false)
-      setOverwriteDeliveryOrderModal({ open: true, conflicts, nonConflicting, index: 0 })
+      setAddGRNConfirmOpen(false)
+      setOverwriteGRNModal({ open: true, conflicts, nonConflicting, index: 0 })
       return
     }
     for (const e of nonConflicting) {
-      const newRow = createGRN({ grnNo: e.grnNo, grnDate: e.grnDate })
-      const inserted = await insertGRN(newRow)
+      const inserted = await persistNewGrn(e)
       setGrns((prev) => [...prev, inserted])
     }
-    setAddDeliveryOrderFormOpen(false)
-    setAddDeliveryOrderConfirmOpen(false)
-    setAddGRNRows([{ grnNo: '', grnDate: '' }])
-    setAddDeliveryOrderApplyDateToAll(false)
+    setAddGRNFormOpen(false)
+    setAddGRNConfirmOpen(false)
+    setAddGRNRows([emptyAddGrnRow()])
+    setAddGRNApplyDateToAll(false)
   }
 
   const getGRNRowDisplay = (row) => {
@@ -1168,7 +1388,7 @@ export default function GRNTrackingPage() {
               ? clerk?.name ?? 'Unassigned'
               : STATUS_REQUIRES_SALESMAN.includes(row.status)
                 ? salesman?.name ?? 'Unassigned'
-                : row.status === 'Delivery In Progress'
+                : row.status === 'Delivery In Progress' || row.status === 'Delivered' || row.status === 'Completed'
                   ? salesman?.name ?? driver?.name ?? 'Unassigned'
                   : driver?.name ?? 'Unassigned'
     const assignedDate =
@@ -1198,55 +1418,55 @@ export default function GRNTrackingPage() {
     }
     updateRow(existingRow.id, resetPayload)
     if (index + 1 < conflicts.length) {
-      setOverwriteDeliveryOrderModal((prev) => ({ ...prev, index: prev.index + 1 }))
+      setOverwriteGRNModal((prev) => ({ ...prev, index: prev.index + 1 }))
     } else {
       for (const e of nonConflicting) {
-        const newRow = createGRN({ grnNo: e.grnNo, grnDate: e.grnDate })
-        const inserted = await insertGRN(newRow)
+        const inserted = await persistNewGrn(e)
         setGrns((prev) => [...prev, inserted])
       }
-      setOverwriteDeliveryOrderModal({ open: false, conflicts: [], nonConflicting: [], index: 0 })
-      setAddDeliveryOrderFormOpen(false)
-      setAddDeliveryOrderConfirmOpen(false)
-      setAddGRNRows([{ grnNo: '', grnDate: '' }])
-      setAddDeliveryOrderApplyDateToAll(false)
+      setOverwriteGRNModal({ open: false, conflicts: [], nonConflicting: [], index: 0 })
+      setAddGRNFormOpen(false)
+      setAddGRNConfirmOpen(false)
+      setAddGRNRows([emptyAddGrnRow()])
+      setAddGRNApplyDateToAll(false)
     }
   }
 
   const handleOverwriteGRNNo = async () => {
     const { conflicts, nonConflicting, index } = overwriteGRNModal
     if (index + 1 < conflicts.length) {
-      setOverwriteDeliveryOrderModal((prev) => ({ ...prev, index: prev.index + 1 }))
+      setOverwriteGRNModal((prev) => ({ ...prev, index: prev.index + 1 }))
     } else {
       for (const e of nonConflicting) {
-        const newRow = createGRN({ grnNo: e.grnNo, grnDate: e.grnDate })
-        const inserted = await insertGRN(newRow)
+        const inserted = await persistNewGrn(e)
         setGrns((prev) => [...prev, inserted])
       }
-      setOverwriteDeliveryOrderModal({ open: false, conflicts: [], nonConflicting: [], index: 0 })
-      setAddDeliveryOrderFormOpen(false)
-      setAddDeliveryOrderConfirmOpen(false)
-      setAddGRNRows([{ grnNo: '', grnDate: '' }])
-      setAddDeliveryOrderApplyDateToAll(false)
+      setOverwriteGRNModal({ open: false, conflicts: [], nonConflicting: [], index: 0 })
+      setAddGRNFormOpen(false)
+      setAddGRNConfirmOpen(false)
+      setAddGRNRows([emptyAddGrnRow()])
+      setAddGRNApplyDateToAll(false)
     }
   }
 
   const handleAddGRNConfirmNo = () => {
-    setAddDeliveryOrderConfirmOpen(false)
+    setAddGRNConfirmOpen(false)
   }
 
   const handleAddGRNFormClose = () => {
-    setAddDeliveryOrderFormOpen(false)
-    setAddDeliveryOrderConfirmOpen(false)
-    setOverwriteDeliveryOrderModal({ open: false, conflicts: [], nonConflicting: [], index: 0 })
-    setAddGRNRows([{ grnNo: '', grnDate: '' }])
-    setAddDeliveryOrderApplyDateToAll(false)
+    setAddGRNFormOpen(false)
+    setAddGRNConfirmOpen(false)
+    setOverwriteGRNModal({ open: false, conflicts: [], nonConflicting: [], index: 0 })
+    setAddGRNRows([emptyAddGrnRow()])
+    setAddGRNApplyDateToAll(false)
+    setAddGRNFormError('')
   }
 
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between gap-4 flex-wrap">
-        <div className="flex items-center gap-2 min-w-0">
+        <div className="flex items-center gap-4 flex-wrap min-w-0">
+          <div className="flex items-center gap-2 min-w-0">
           <label htmlFor="grn-no-search" className="text-sm font-medium text-slate-700 shrink-0">
             GRN No.
           </label>
@@ -1259,15 +1479,24 @@ export default function GRNTrackingPage() {
             className="py-2 px-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-900 focus:border-blue-900 w-48 max-w-full text-sm"
             aria-label="Search by GRN number"
           />
+          </div>
+          <TrackingMonthFilter
+            id="grn-month-filter"
+            availableMonths={availableMonths}
+            value={selectedMonth}
+            onChange={setSelectedMonth}
+          />
         </div>
         <div className="flex items-center gap-4 shrink-0">
+          <RefreshListButton onRefresh={loadGRNs} loading={grnsLoading} label="Refresh GRN list" />
         <button
           type="button"
           onClick={() => {
-            setAddDeliveryOrderFormOpen(true)
-            setAddDeliveryOrderConfirmOpen(false)
-            setAddGRNRows(addGRNMultiple ? Array(10).fill(null).map(() => ({ grnNo: '', grnDate: '' })) : [{ grnNo: '', grnDate: '' }])
-            setAddDeliveryOrderApplyDateToAll(false)
+            setAddGRNFormOpen(true)
+            setAddGRNConfirmOpen(false)
+            setAddGRNRows(addGRNMultiple ? Array(10).fill(null).map(() => emptyAddGrnRow()) : [emptyAddGrnRow()])
+            setAddGRNFormError('')
+            setAddGRNApplyDateToAll(false)
           }}
           className="inline-flex items-center gap-2 px-4 py-2 bg-blue-900 text-white rounded-lg hover:bg-blue-800 text-sm font-medium"
         >
@@ -1280,9 +1509,13 @@ export default function GRNTrackingPage() {
       <div className="bg-white rounded-lg shadow border border-slate-200 overflow-x-auto">
         {grnsLoading ? (
           <div className="p-8 text-center text-slate-500">Loading GRN…</div>
-        ) : filteredGRNs.length === 0 ? (
+        ) : filteredGrnCount === 0 ? (
           <div className="p-8 text-center text-slate-500">
-            {grnSearchQuery.trim() ? 'No GRNs match your search.' : 'No GRN added yet. Click &quot;Add New GRN&quot; to add one.'}
+            {grnSearchQuery.trim()
+              ? 'No GRNs match your search.'
+              : selectedMonth
+                ? `No GRN for ${formatMonthLabel(selectedMonth)}.`
+                : 'No GRN added yet. Click "Add New GRN" to add one.'}
           </div>
         ) : (
         <table className="w-full min-w-[900px] text-sm">
@@ -1308,12 +1541,12 @@ export default function GRNTrackingPage() {
               <th className="text-left py-3 px-4 font-semibold text-slate-700">Assigned To</th>
               <th className="text-left py-3 px-4 font-semibold text-slate-700">Assigned Date</th>
               <th className="text-left py-3 px-4 font-semibold text-slate-700">Remark</th>
-              <th className="text-left py-3 px-4 font-semibold text-slate-700">Discrepancy</th>
+              <th className="text-left py-3 px-4 font-semibold text-slate-700">Additional Remark</th>
               {canUseTestMode && <th className="text-left py-3 px-4 font-semibold text-slate-700 w-14">Delete</th>}
             </tr>
           </thead>
           <tbody>
-            {filteredGRNs.map((row) => {
+            {pagedGRNs.map((row) => {
               const salesman = row.assignedSalesmanId
                 ? salesmen.find((s) => s.id === row.assignedSalesmanId)
                 : null
@@ -1360,12 +1593,12 @@ export default function GRNTrackingPage() {
               const showAssignedPerson =
                 (STATUS_REQUIRES_CLERK.includes(row.status) && clerk) ||
                 (STATUS_REQUIRES_SALESMAN.includes(row.status) && salesman) ||
-                (row.status === 'Delivery In Progress' && (salesman || assignedDriver))
+                (STATUS_SHOWS_DELIVERY_ASSIGNEE.includes(row.status) && (salesman || assignedDriver))
               const assignedPersonName = STATUS_REQUIRES_CLERK.includes(row.status)
                 ? (clerk?.name ?? '')
                 : STATUS_REQUIRES_SALESMAN.includes(row.status)
                   ? (salesman?.name ?? '')
-                  : row.status === 'Delivery In Progress'
+                  : STATUS_SHOWS_DELIVERY_ASSIGNEE.includes(row.status)
                     ? (salesman?.name ?? assignedDriver?.name ?? '')
                     : ''
               const assignedToDisplay =
@@ -1378,12 +1611,17 @@ export default function GRNTrackingPage() {
                       : showAssignedPerson
                         ? assignedPersonName
                         : (assignedDriver?.name ?? 'Unassigned')
+              const canReassignAssignee =
+                !isCompletedLocked &&
+                assignedToDisplay !== 'Unassigned' &&
+                (assignedToDisplay === salesman?.name || assignedToDisplay === assignedDriver?.name)
               const assignedDateDisplay =
                 row.deliveryDate && row.deliverySlot
                   ? `${formatDate(row.deliveryDate)} - ${row.deliverySlot}`
                   : row.deliveryDate
                     ? formatDate(row.deliveryDate)
                     : '–'
+              const canReassignDate = !isCompletedLocked && assignedDateDisplay !== '–' && !!row.deliveryDate
               const isAssignedDateReadOnlyClerkSalesman =
                 STATUS_REQUIRES_CLERK.includes(row.status) ||
                 STATUS_REQUIRES_SALESMAN.includes(row.status) ||
@@ -1427,8 +1665,8 @@ export default function GRNTrackingPage() {
                       aria-label={`Select GRN ${row.grnNo || row.id}`}
                     />
                   </td>
-                  <td className="py-2 px-4 w-12 text-center" title={isStatusOverdue(row) ? `Status "${row.status}" has exceeded the allowed duration (Phase ${getPhase(row.status)})` : ''}>
-                    {isStatusOverdue(row) ? (
+                  <td className="py-2 px-4 w-12 text-center" title={isStatusOverdue(row, alertSettings) ? `Status "${row.status}" has exceeded the allowed duration (Phase ${getPhase(row.status)})` : ''}>
+                    {isStatusOverdue(row, alertSettings) ? (
                       <AlertTriangle size={20} className="text-amber-500 inline-block" aria-label="Status overdue" />
                     ) : (
                       <span className="text-slate-300" aria-hidden>–</span>
@@ -1468,106 +1706,64 @@ export default function GRNTrackingPage() {
                     )}
                   </td>
                   <td className="py-2 px-4">
-                    <span
-                      className={`py-1.5 px-2 block min-w-[140px] ${
-                        assignedToDisplay === 'Unassigned' ? 'text-slate-500' : 'text-slate-700'
-                      }`}
-                    >
-                      {assignedToDisplay}
-                    </span>
-                  </td>
-                  <td className="py-2 px-4">
-                    <span
-                      className="py-1.5 px-2 block min-w-[140px] text-slate-700"
-                    >
-                      {assignedDateDisplay}
-                    </span>
-                  </td>
-                  <td className="py-2 px-4">
-                    <input
-                      type="text"
-                      value={row.remark}
-                      onChange={(e) => updateRow(row.id, { remark: e.target.value })}
-                      readOnly={!canEditRow}
-                      className={`w-full min-w-[100px] py-1.5 px-2 border rounded ${
-                        canEditRow
-                          ? 'border-slate-300 focus:ring-2 focus:ring-blue-900'
-                          : 'border-transparent bg-transparent read-only:bg-transparent'
-                      }`}
-                      placeholder="Remark"
+                    <AssignedToCell
+                      name={assignedToDisplay}
+                      showReassign={canReassignAssignee}
+                      onReassign={() =>
+                        setReassignModal({
+                          open: true,
+                          rowId: row.id,
+                          currentName: assignedToDisplay,
+                        })
+                      }
                     />
                   </td>
                   <td className="py-2 px-4">
-                    <div className="flex items-center gap-2">
-                      {isCompletedLocked ? (
-                        <>
-                          <input
-                            type="checkbox"
-                            checked={row.discrepancy?.checked ?? false}
-                            disabled
-                            className="rounded border-slate-300 text-blue-900 opacity-70 cursor-not-allowed"
-                          />
-                          {row.discrepancy?.checked && row.discrepancy?.title ? (
-                            <span
-                              className="relative group/tip max-w-[120px] truncate text-slate-700"
-                              title={row.discrepancy?.description}
-                            >
-                              {row.discrepancy.title}
-                              {row.discrepancy.description && (
-                                <span className="absolute left-0 bottom-full mb-1 hidden group-hover/tip:block z-10 py-2 px-3 bg-slate-800 text-white text-xs rounded shadow-lg max-w-[220px] whitespace-normal">
-                                  {row.discrepancy.description}
-                                </span>
-                              )}
-                            </span>
-                          ) : row.discrepancy?.checked ? (
-                            <span className="text-slate-500 text-xs">No details</span>
-                          ) : null}
-                        </>
-                      ) : row.discrepancy?.checked ? (
-                        <>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setDiscrepancyModal({
-                                open: true,
-                                rowId: row.id,
-                                title: row.discrepancy?.title || '',
-                                description: row.discrepancy?.description || '',
-                              })
-                            }
-                            className="p-1.5 rounded text-slate-600 hover:bg-slate-100"
-                            title="Edit discrepancy"
-                            aria-label="Edit discrepancy"
-                          >
-                            <Pencil size={18} />
-                          </button>
-                          {row.discrepancy?.title ? (
-                            <span
-                              className="relative group/tip max-w-[120px] truncate text-slate-700"
-                              title={row.discrepancy?.description}
-                            >
-                              {row.discrepancy.title}
-                              {row.discrepancy.description && (
-                                <span className="absolute left-0 bottom-full mb-1 hidden group-hover/tip:block z-10 py-2 px-3 bg-slate-800 text-white text-xs rounded shadow-lg max-w-[220px] whitespace-normal">
-                                  {row.discrepancy.description}
-                                </span>
-                              )}
-                            </span>
-                          ) : (
-                            <span className="text-slate-500 text-xs">No details</span>
-                          )}
-                        </>
-                      ) : (
-                        <>
-                          <input
-                            type="checkbox"
-                            checked={false}
-                            onChange={(e) => e.target.checked && handleDiscrepancyCheck(row.id, true)}
-                            className="rounded border-slate-300 text-blue-900 focus:ring-blue-900"
-                          />
-                        </>
-                      )}
-                    </div>
+                    <AssignedToCell
+                      name={assignedDateDisplay}
+                      showReassign={canReassignDate}
+                      reassignLabel="Reassign date"
+                      onReassign={() =>
+                        setReassignDateModal({
+                          open: true,
+                          rowId: row.id,
+                          currentLabel: assignedDateDisplay,
+                          initialDate: row.deliveryDate || '',
+                          initialSlot: row.deliverySlot || '',
+                        })
+                      }
+                    />
+                  </td>
+                  <td className="py-2 px-4">
+                    {hasLinkedGrc(row, grcs) || hasLinkedInvoice(row) ? (
+                      <LinkedTrackingRemark
+                        remark={row.remark}
+                        grcLookup={grcLookup}
+                        grnLookup={grnLookup}
+                        invoiceLookup={invoiceLookup}
+                        className="py-1.5 px-2 block min-w-[100px]"
+                      />
+                    ) : (
+                      <input
+                        type="text"
+                        value={row.remark}
+                        onChange={(e) => updateRow(row.id, { remark: e.target.value })}
+                        readOnly={!canEditRow}
+                        className={`w-full min-w-[100px] py-1.5 px-2 border rounded ${
+                          canEditRow
+                            ? 'border-slate-300 focus:ring-2 focus:ring-blue-900'
+                            : 'border-transparent bg-transparent read-only:bg-transparent'
+                        }`}
+                        placeholder="Remark"
+                      />
+                    )}
+                  </td>
+                  <td className="py-2 px-4">
+                    <AdditionalRemarkCell
+                      discrepancy={row.discrepancy}
+                      canEdit={!isCompletedLocked}
+                      onEdit={() => handleAdditionalRemarkOpen(row.id)}
+                    />
                   </td>
                   {canUseTestMode && !isCompletedLocked && (
                     <td className="py-2 px-4">
@@ -1587,11 +1783,19 @@ export default function GRNTrackingPage() {
           </tbody>
         </table>
         )}
+        {!grnsLoading && filteredGrnCount > 0 && (
+          <TrackingPagination
+            currentPage={currentPage}
+            totalPages={totalPages}
+            totalItems={filteredGrnCount}
+            onPageChange={goToPage}
+          />
+        )}
       </div>
 
       {/* Add New GRN - Form */}
       {addGRNFormOpen && !addGRNConfirmOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50" onClick={handleAddGRNFormClose}>
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50">
           <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-auto p-6" onClick={(e) => e.stopPropagation()}>
             <h3 className="text-lg font-semibold text-slate-800 mb-4">Add New GRN</h3>
             <label className="flex items-center gap-2 mb-4 cursor-pointer">
@@ -1607,13 +1811,18 @@ export default function GRNTrackingPage() {
               <div className="space-y-4">
                 <div>
                   <label className="block text-sm font-medium text-slate-700 mb-1">GRN No</label>
-                  <input
-                    type="text"
-                    value={addGRNRows[0]?.grnNo || ''}
-                    onChange={(e) => setAddGRNRow(0, 'grnNo', e.target.value)}
-                    className="w-full py-2 px-3 border border-slate-300 rounded focus:ring-2 focus:ring-blue-900"
-                    placeholder="e.g. GRN-001"
-                  />
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-semibold text-slate-600 shrink-0">{GRN_NO_PREFIX}</span>
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      maxLength={DO_DIGIT_LEN}
+                      value={addGRNRows[0]?.grnDigits || ''}
+                      onChange={(e) => setAddGRNRow(0, 'grnDigits', e.target.value)}
+                      className="flex-1 py-2 px-3 border border-slate-300 rounded focus:ring-2 focus:ring-blue-900 font-mono"
+                      placeholder="12345"
+                    />
+                  </div>
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-slate-700 mb-1">GRN Date</label>
@@ -1624,6 +1833,24 @@ export default function GRNTrackingPage() {
                     className="w-full py-2 px-3 border border-slate-300 rounded focus:ring-2 focus:ring-blue-900"
                   />
                 </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Additional Remark</label>
+                  <input
+                    type="text"
+                    value={addGRNRows[0]?.additionalRemark || ''}
+                    onChange={(e) => setAddGRNRow(0, 'additionalRemark', e.target.value)}
+                    className="w-full py-2 px-3 border border-slate-300 rounded focus:ring-2 focus:ring-blue-900"
+                    placeholder="Optional"
+                  />
+                </div>
+                <InvoiceAttachmentSearch
+                  esdInvoices={esdInvoicesList}
+                  autocountInvoices={autocountInvoicesList}
+                  query={addGRNRows[0]?.attachmentQuery || ''}
+                  onQueryChange={(value) => setAddGRNRow(0, 'attachmentQuery', value)}
+                  selected={addGRNRows[0]?.attachmentInvoice || null}
+                  onSelect={(inv) => setAddGRNRow(0, 'attachmentInvoice', inv)}
+                />
               </div>
             ) : (
               <div className="overflow-x-auto">
@@ -1632,6 +1859,7 @@ export default function GRNTrackingPage() {
                     <tr className="bg-slate-100">
                       <th className="text-left py-2 px-3 font-semibold text-slate-700">GRN No</th>
                       <th className="text-left py-2 px-3 font-semibold text-slate-700">GRN Date</th>
+                      <th className="text-left py-2 px-3 font-semibold text-slate-700">Additional Remark</th>
                       <th className="text-left py-2 px-3 font-semibold text-slate-700 w-28">
                         <label className="flex items-center gap-1 cursor-pointer">
                           <input
@@ -1649,13 +1877,18 @@ export default function GRNTrackingPage() {
                     {addGRNRows.map((row, i) => (
                       <tr key={i} className="border-t border-slate-200">
                         <td className="py-2 px-3">
-                          <input
-                            type="text"
-                            value={row.grnNo}
-                            onChange={(e) => setAddGRNRow(i, 'grnNo', e.target.value)}
-                            className="w-full py-1.5 px-2 border border-slate-300 rounded text-sm"
-                            placeholder={`No. ${i + 1}`}
-                          />
+                          <div className="flex items-center gap-1">
+                            <span className="text-xs font-semibold text-slate-600 shrink-0">{GRN_NO_PREFIX}</span>
+                            <input
+                              type="text"
+                              inputMode="numeric"
+                              maxLength={DO_DIGIT_LEN}
+                              value={row.grnDigits}
+                              onChange={(e) => setAddGRNRow(i, 'grnDigits', e.target.value)}
+                              className="w-full py-1.5 px-2 border border-slate-300 rounded text-sm font-mono"
+                              placeholder="12345"
+                            />
+                          </div>
                         </td>
                         <td className="py-2 px-3">
                           <input
@@ -1666,12 +1899,24 @@ export default function GRNTrackingPage() {
                             className={`w-full py-1.5 px-2 border rounded text-sm ${addGRNApplyDateToAll && i > 0 ? 'bg-slate-100 border-slate-200' : 'border-slate-300'}`}
                           />
                         </td>
+                        <td className="py-2 px-3">
+                          <input
+                            type="text"
+                            value={row.additionalRemark || ''}
+                            onChange={(e) => setAddGRNRow(i, 'additionalRemark', e.target.value)}
+                            className="w-full py-1.5 px-2 border border-slate-300 rounded text-sm"
+                            placeholder="Optional"
+                          />
+                        </td>
                         <td className="py-2 px-3" />
                       </tr>
                     ))}
                   </tbody>
                 </table>
               </div>
+            )}
+            {addGRNFormError && (
+              <p className="mt-4 text-sm text-red-600 bg-red-50 border border-red-100 rounded-lg px-3 py-2">{addGRNFormError}</p>
             )}
             <div className="flex justify-end gap-2 mt-6">
               <button type="button" onClick={handleAddGRNFormClose} className="px-4 py-2 border border-slate-300 rounded-lg hover:bg-slate-50">Cancel</button>
@@ -1830,22 +2075,13 @@ export default function GRNTrackingPage() {
         onClose={() => setInvoiceAttachedNotice({ open: false, message: '' })}
       />
 
-      <DiscrepancyModal
-        isOpen={discrepancyModal.open}
-        initialTitle={discrepancyModal.title}
-        initialDesc={discrepancyModal.description}
-        onClose={() => {
-          if (discrepancyModal.rowId) handleDiscrepancyCancel(discrepancyModal.rowId)
-          setDiscrepancyModal({ open: false, rowId: null, title: '', description: '' })
-        }}
-        onSave={({ title, description }) =>
-          discrepancyModal.rowId &&
-          handleDiscrepancySave(discrepancyModal.rowId, { title, description })
-        }
-        onRemove={
-          discrepancyModal.rowId
-            ? () => handleDiscrepancyCancel(discrepancyModal.rowId)
-            : undefined
+      <AdditionalRemarkModal
+        isOpen={additionalRemarkModal.open}
+        initialRemark={additionalRemarkModal.remark}
+        onClose={closeAdditionalRemarkModal}
+        onSave={(remark) =>
+          additionalRemarkModal.rowId &&
+          handleAdditionalRemarkSave(additionalRemarkModal.rowId, remark)
         }
       />
 
@@ -1887,6 +2123,7 @@ export default function GRNTrackingPage() {
 
       <SelectWarehouseModal
         isOpen={holdWarehouseModal.open}
+        ownOnly
         rowId={holdWarehouseModal.rowId}
         previousStatus={holdWarehouseModal.previousStatus}
         onClose={handleHoldWarehouseModalCancel}
@@ -1895,6 +2132,7 @@ export default function GRNTrackingPage() {
 
       <SelectWarehouseModal
         isOpen={chopSignNoWarehouseModal.open}
+        ownOnly
         rowId={chopSignNoWarehouseModal.rowId}
         previousStatus={chopSignNoWarehouseModal.previousStatus}
         onClose={handleChopSignNoWarehouseCancel}
@@ -1955,6 +2193,34 @@ export default function GRNTrackingPage() {
             : setDriverModal({ open: false, rowId: null, previousStatus: '' })
         }
         onSelect={handleDriverSelect}
+      />
+
+      <ReassignAssigneeModal
+        isOpen={reassignModal.open}
+        currentName={reassignModal.currentName}
+        onClose={() => setReassignModal({ open: false, rowId: null, currentName: '' })}
+        onConfirm={({ type, personId }) => {
+          if (reassignModal.rowId) {
+            updateRow(reassignModal.rowId, reassignAssigneeUpdates(type, personId))
+          }
+          setReassignModal({ open: false, rowId: null, currentName: '' })
+        }}
+      />
+
+      <ReassignAssignedDateModal
+        isOpen={reassignDateModal.open}
+        currentLabel={reassignDateModal.currentLabel}
+        initialDate={reassignDateModal.initialDate}
+        initialSlot={reassignDateModal.initialSlot}
+        onClose={() =>
+          setReassignDateModal({ open: false, rowId: null, currentLabel: '', initialDate: '', initialSlot: '' })
+        }
+        onConfirm={({ date, slot }) => {
+          if (reassignDateModal.rowId) {
+            updateRow(reassignDateModal.rowId, reassignDateUpdates(date, slot))
+          }
+          setReassignDateModal({ open: false, rowId: null, currentLabel: '', initialDate: '', initialSlot: '' })
+        }}
       />
 
       <NoticeModal
@@ -2098,6 +2364,12 @@ export default function GRNTrackingPage() {
           </div>
         </div>
       )}
+
+      <RemoveSelfCollectModal
+        isOpen={removeSelfCollectModal.open}
+        onYes={handleRemoveSelfCollectYes}
+        onNo={handleRemoveSelfCollectNo}
+      />
 
       {chopSignWarehouseConfirmModal.open && (
         <div

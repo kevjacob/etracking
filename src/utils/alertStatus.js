@@ -1,39 +1,69 @@
 /**
  * Shared logic for "on alert" (status exceeded allowed duration).
- * Used by Home page alert boxes and matches Invoice/GRN/DO tracking pages.
+ * Used by Home page alert boxes and tracking pages.
  */
-const PHASE_1 = ['Billed']
-const PHASE_2 = [
-  'Preparing Delivery',
-  'Hold - Office',
-  'Hold - Warehouse',
-  'Hold - Salesman',
-  'Chop & Sign - Office',
-  'Chop & Sign - Warehouse',
-  'Chop & Sign - Salesman',
-  'Transfer',
-]
-const PHASE_3 = ['Delivery In Progress']
-const PHASE_4 = ['Delivered']
-const PHASE_5 = ['Completed', 'Cancelled']
+import { TRACKING_STATUS_OPTIONS, COD_ALERT_SETTING_KEY } from '../constants/trackingStatuses'
 
-function getStatusMaxDays(status) {
-  if (status === 'Cancelled') return 999
-  if (PHASE_1.includes(status)) return 1
-  if (status === 'Preparing Delivery') return 3
-  if (PHASE_2.includes(status)) return 4
-  if (PHASE_3.includes(status)) return 1.5
-  if (PHASE_4.includes(status)) return 1
-  if (PHASE_5.includes(status)) return 1
-  return 1
+/** Default alert periods (days) before a row appears on alert. */
+export function getDefaultAlertSettings() {
+  return {
+    Billed: 1,
+    'Preparing Delivery': 3,
+    'Delivery In Progress': 1.5,
+    Delivered: 1,
+    'Hold - Office': 4,
+    'Hold - Warehouse': 4,
+    'Hold - Salesman': 4,
+    'Chop & Sign - Office': 4,
+    'Chop & Sign - Warehouse': 4,
+    'Chop & Sign - Salesman': 4,
+    Transfer: 4,
+    Completed: 1,
+    Cancelled: 999,
+    [COD_ALERT_SETTING_KEY]: 1,
+  }
 }
 
-export function isStatusOverdue(row) {
+export function mergeAlertSettings(stored) {
+  const defaults = getDefaultAlertSettings()
+  if (!stored || typeof stored !== 'object') return { ...defaults }
+  const merged = { ...defaults }
+  for (const [key, value] of Object.entries(stored)) {
+    const n = Number(value)
+    if (!Number.isFinite(n) || n < 0) continue
+    merged[key] = n
+  }
+  return merged
+}
+
+export function getAlertPeriodDays(key, settings) {
+  const merged = mergeAlertSettings(settings)
+  const days = merged[key]
+  return Number.isFinite(days) ? days : 1
+}
+
+export function isStatusOverdue(row, settings) {
+  const updatedAt = row?.statusUpdatedAt
+  if (!updatedAt) return false
+  const maxDays = getAlertPeriodDays(row.status, settings)
+  if (maxDays === 0 || maxDays >= 999) return false
+  const updated = new Date(updatedAt).getTime()
+  const now = Date.now()
+  const maxMs = maxDays * 24 * 60 * 60 * 1000
+  return now - updated > maxMs
+}
+
+export function isCodOverdue(row, settings) {
+  if (!row?.cod) return false
+  if (row.status === 'Completed' || row.status === 'Cancelled') return false
+  const maxDays = getAlertPeriodDays(COD_ALERT_SETTING_KEY, settings)
+  if (maxDays === 0) return false
   const updatedAt = row?.statusUpdatedAt
   if (!updatedAt) return false
   const updated = new Date(updatedAt).getTime()
   const now = Date.now()
-  const maxDays = getStatusMaxDays(row.status)
   const maxMs = maxDays * 24 * 60 * 60 * 1000
   return now - updated > maxMs
 }
+
+export { TRACKING_STATUS_OPTIONS, COD_ALERT_SETTING_KEY }

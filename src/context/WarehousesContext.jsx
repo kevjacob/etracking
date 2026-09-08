@@ -40,6 +40,7 @@ function mapWarehouse(row) {
     name: r.name || r.warehouse_name || '',
     picName: r.picName ?? r.pic_name ?? '',
     picPhone: r.picPhone ?? r.pic_phone ?? '',
+    own: r.own ?? true,
   }
 }
 
@@ -71,12 +72,13 @@ export function WarehousesProvider({ children }) {
     fetchWarehouses()
   }, [fetchWarehouses])
 
-  const addWarehouse = useCallback(async (warehouseName, picName) => {
+  const addWarehouse = useCallback(async ({ name, picName, picPhone, own = true }) => {
     if (isSupabaseConfigured()) {
       const payload = toSnakeCase({
-        name: warehouseName ?? '',
+        name: name ?? '',
         picName: picName ?? '',
-        picPhone: '',
+        picPhone: picPhone ?? '',
+        own: own !== false,
       })
       const { data, error } = await supabase.from('warehouses').insert(payload).select('*').single()
       if (error) throw error
@@ -87,9 +89,10 @@ export function WarehousesProvider({ children }) {
     const list = loadWarehouses()
     const newWarehouse = {
       id: generateId(),
-      name: warehouseName ?? '',
+      name: name ?? '',
       picName: picName ?? '',
-      picPhone: '',
+      picPhone: picPhone ?? '',
+      own: own !== false,
     }
     list.unshift(newWarehouse)
     saveWarehouses(list)
@@ -97,12 +100,13 @@ export function WarehousesProvider({ children }) {
     return newWarehouse.id
   }, [])
 
-  const updateWarehouse = useCallback(async (id, { name, picName, picPhone }) => {
+  const updateWarehouse = useCallback(async (id, { name, picName, picPhone, own }) => {
     if (isSupabaseConfigured()) {
       const payload = toSnakeCase({
         name: name ?? '',
         picName: picName ?? '',
         picPhone: picPhone ?? '',
+        own: own !== false,
       })
       const { data, error } = await supabase.from('warehouses').update(payload).eq('id', id).select('*').single()
       if (error) throw error
@@ -113,7 +117,13 @@ export function WarehousesProvider({ children }) {
     const list = loadWarehouses()
     const index = list.findIndex((w) => w.id === id)
     if (index === -1) return id
-    const updated = { ...list[index], name: name ?? '', picName: picName ?? '', picPhone: picPhone ?? '' }
+    const updated = {
+      ...list[index],
+      name: name ?? '',
+      picName: picName ?? '',
+      picPhone: picPhone ?? '',
+      own: own !== false,
+    }
     list[index] = updated
     saveWarehouses(list)
     setWarehouses((prev) => prev.map((w) => (w.id === id ? mapWarehouse(updated) : w)))
