@@ -1,8 +1,55 @@
-# Supabase (Docker) for eTracking
+# Supabase for eTracking
 
 Use Supabase as the database backend instead of localStorage.
 
-## Quick start
+## Cloud-only setup (recommended)
+
+Office LAN, Vercel, and mobile all use **one hosted Supabase project**. No Docker, no backup daemon, live updates everywhere.
+
+1. **Create `.env`** in the project root (same keys as Vercel):
+
+   ```env
+   VITE_SUPABASE_URL=https://your-project-ref.supabase.co
+   VITE_SUPABASE_ANON_KEY=your-anon-public-key
+   ```
+
+   Get these from [Supabase Dashboard](https://supabase.com/dashboard) → your project → **Settings → API** (use the **anon public** key, not service_role).
+
+2. **One-time cutover** (if you were on Docker + backup before):
+
+   - Make sure cloud has the latest data: `npm run backup:mirror` (while Docker is still running and `.env` still points at local).
+   - Update `.env` to the cloud URL and anon key above.
+   - Stop the backup daemon if it is running (`Ctrl+C` on `npm run backup:daemon`).
+   - Stop Docker: `npx supabase stop` (optional — you can leave Docker installed but unused).
+
+3. **Start the app**:
+
+   ```bash
+   npm run dev
+   ```
+
+   Every device (office PCs, phones, Vercel) now reads and writes the **same** database. Changes appear in seconds via Realtime — no sync delay.
+
+4. **Office LAN**: Other PCs can open `http://<host-IP>:5173` or the Vercel URL; both hit cloud Supabase. The host PC no longer needs Docker running for data.
+
+5. **Migrations**: Hosted project must have the same schema as `supabase/migrations/`. Apply with `npx supabase db push` (linked project) or run the SQL files in the Dashboard SQL Editor. Realtime: run `supabase/migrations/20250303100000_enable_realtime.sql` on cloud if not already applied.
+
+### What you can remove after cutover
+
+| Old | New |
+|-----|-----|
+| `npx supabase start` (Docker) | Not needed |
+| `npm run backup:daemon` | Not needed |
+| `SUPABASE_REMOTE_*` in `.env` | Not needed (app talks to cloud directly) |
+| Hourly / 90s sync delay | Instant (Realtime) |
+
+Keep `npm run backup` only if you want occasional JSON export via **Settings → Import/Export**, not for sync.
+
+---
+
+## Local Docker (legacy / dev offline)
+
+Use this only if you want a fully offline database on one PC.
 
 1. **Start Supabase locally** (requires Docker):
 
@@ -29,9 +76,11 @@ Use Supabase as the database backend instead of localStorage.
 
    If both `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` are set, the app uses Supabase for all data (employees, warehouses, invoices, credit notes, GRN, delivery orders). Otherwise it falls back to localStorage.
 
-## Access from other PCs on the network
+## Access from other PCs on the network (Docker only)
 
-Data is in the Supabase Docker stack on the **PC that runs `npx supabase start`**. To use the app from another device on the same LAN:
+With **cloud-only** setup, skip this section — any PC or phone uses the Vercel URL or `npm run dev`; data is always on Supabase cloud.
+
+For **local Docker**, data lives on the PC that runs `npx supabase start`:
 
 1. On the **host PC**, run `npx supabase start` and `npm run dev` (the dev server is already bound to all interfaces).
 2. Find the host PC’s IP (e.g. `192.168.1.100` via `ipconfig` / `ifconfig`).
@@ -52,17 +101,6 @@ alter publication supabase_realtime add table public.delivery_orders;
 ```
 
 (Skip any line if that table is already in the publication.)
-
-## Hosted Supabase
-
-Use your project’s API URL and anon key in `.env`:
-
-```env
-VITE_SUPABASE_URL=https://your-project-ref.supabase.co
-VITE_SUPABASE_ANON_KEY=your-anon-key
-```
-
-Migrations must be applied to the hosted project (e.g. `npx supabase db push` or run the SQL in `supabase/migrations/` in the SQL editor).
 
 ## Stop local Supabase
 

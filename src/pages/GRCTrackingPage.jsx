@@ -10,6 +10,9 @@ import { sortBySerial } from '../utils/serialSort'
 import { fetchGRCs, insertGRC, updateGRC, deleteGRC, createGRCRow } from '../api/grc'
 import { fetchGRNs, insertGRN, updateGRN, createGRNRow } from '../api/grn'
 import { fetchInvoices, updateInvoice } from '../api/invoices'
+import { fetchInvoices as fetchAutocountInvoices, updateInvoice as updateAutocountInvoice } from '../api/autocountInvoices'
+import InvoiceAttachmentSearch, { normalizeAttachmentInvoices } from '../components/InvoiceAttachmentSearch'
+import InvoiceSearchModal, { resolveSelectedInvoices } from '../components/InvoiceSearchModal'
 import DeliveryTimeAndAttachmentModal from '../components/DeliveryTimeAndAttachmentModal'
 import AdditionalRemarkModal from '../components/AdditionalRemarkModal'
 import AdditionalRemarkCell from '../components/AdditionalRemarkCell'
@@ -49,6 +52,7 @@ import {
   GRC_DIGIT_LEN,
   GRN_NO_PREFIX,
 } from '../utils/grcGrnSync'
+import { buildInvoiceUpdateForDocLink } from '../utils/invoiceLinkSync'
 
 function getTodayDateStr() {
   const d = new Date()
@@ -117,7 +121,16 @@ const PHASE_4_LOCKED_MSG = 'This Status can no longer be changed as the order ha
 import { defaultAdditionalRemark, getAdditionalRemarkText, saveAdditionalRemark } from '../utils/additionalRemark'
 
 function emptyAddGrcForm() {
-  return { grcDigits: '', doDigits: '', doDate: '', outlet: '', grcDate: '', additionalRemark: '' }
+  return {
+    grcDigits: '',
+    doDigits: '',
+    doDate: '',
+    outlet: '',
+    grcDate: '',
+    additionalRemark: '',
+    attachmentQuery: '',
+    attachmentInvoices: [],
+  }
 }
 
 function createGRC(overrides = {}) {
@@ -236,8 +249,10 @@ export default function GRCTrackingPage() {
     deliveryOrderRow: null,
   })
   const [invoiceSearchQuery, setInvoiceSearchQuery] = useState('')
-  const [invoiceSearchSelectedId, setInvoiceSearchSelectedId] = useState(null)
+  const [invoiceSearchSelectedIds, setInvoiceSearchSelectedIds] = useState([])
   const [invoiceSearchList, setInvoiceSearchList] = useState([])
+  const [esdInvoicesList, setEsdInvoicesList] = useState([])
+  const [autocountInvoicesList, setAutocountInvoicesList] = useState([])
   const [invoiceAttachedNotice, setInvoiceAttachedNotice] = useState({ open: false, message: '' })
   const [grcSearchQuery, setGrcSearchQuery] = useState('')
   const getGrcDate = useCallback((row) => row.grcDate, [])
@@ -298,6 +313,15 @@ export default function GRCTrackingPage() {
   useEffect(() => {
     loadGrns()
   }, [loadGrns])
+
+  useEffect(() => {
+    fetchInvoices()
+      .then((list) => setEsdInvoicesList(Array.isArray(list) ? list : []))
+      .catch(() => setEsdInvoicesList([]))
+    fetchAutocountInvoices()
+      .then((list) => setAutocountInvoicesList(Array.isArray(list) ? list : []))
+      .catch(() => setAutocountInvoicesList([]))
+  }, [])
 
   useRealtimeTable('grc', setGrcs)
   useRealtimeTable('grn', setGrns)
@@ -461,7 +485,7 @@ export default function GRCTrackingPage() {
     fetchInvoices().then((list) => {
       setInvoiceSearchList(list)
       setInvoiceSearchQuery('')
-      setInvoiceSearchSelectedId(null)
+      setInvoiceSearchSelectedIds([])
       setInvoiceSearchModal({
         open: true,
         forRowId: rowId,
@@ -479,7 +503,7 @@ export default function GRCTrackingPage() {
     )
   }
 
-  const handleInvoiceSearchConfirm = async () => {
+  const handleInvoiceSearchConfirm = async (addAnother = false) => {
     const { forRowId, attachmentType: type, deliveryOrderRow } = invoiceSearchModal
     if (!forRowId || !deliveryOrderRow) {
       setInvoiceSearchModal({ open: false, forRowId: null, attachmentType: 'original', deliveryOrderRow: null })
@@ -487,43 +511,54 @@ export default function GRCTrackingPage() {
       return
     }
     const filtered = getFilteredInvoicesForSearch()
-    const selectedInvoice = invoiceSearchSelectedId
-      ? invoiceSearchList.find((r) => r.id === invoiceSearchSelectedId)
-      : filtered.length === 1 ? filtered[0] : null
-    if ((type === 'original' || type === 'copy') && !selectedInvoice) return
-    const invoiceNo = selectedInvoice?.invoiceNo || selectedInvoice?.id
-    if (type === 'original' && selectedInvoice) {
-      await updateInvoice(selectedInvoice.id, {
-        status: deliveryOrderRow.status,
-        assignedDriverId: deliveryOrderRow.assignedDriverId,
-        assignedSalesmanId: deliveryOrderRow.assignedSalesmanId,
-        deliveryDate: deliveryOrderRow.deliveryDate || '',
-        deliverySlot: deliveryOrderRow.deliverySlot || '',
-      })
+    const selectedInvoices = resolveSelectedInvoices(invoiceSearchList, invoiceSearchSelectedIds, filtered)
+    if ((type === 'original' || type === 'copy') && selectedInvoices.length === 0) return
+    const invoiceNos = selectedInvoices.map((inv) => inv.invoiceNo || inv.id)
+    if (type === 'original') {
+      for (const selectedInvoice of selectedInvoices) {
+        await updateInvoice(selectedInvoice.id, {
+          status: deliveryOrderRow.status,
+          assignedDriverId: deliveryOrderRow.assignedDriverId,
+          assignedSalesmanId: deliveryOrderRow.assignedSalesmanId,
+          deliveryDate: deliveryOrderRow.deliveryDate || '',
+          deliverySlot: deliveryOrderRow.deliverySlot || '',
+        })
+      }
       setInvoiceAttachedNotice({
         open: true,
-        message: `Invoice ${invoiceNo} has been updated with GRC ${deliveryOrderRow.grcNo || forRowId}.`,
+        message: `Invoice ${invoiceNos.join(', ')} has been updated with GRC ${deliveryOrderRow.grcNo || forRowId}.`,
       })
     }
-    if (type === 'copy' && selectedInvoice) {
+    if (type === 'copy') {
       const row = grcs.find((r) => r.id === forRowId)
-      const currentRemark = (row?.remark || '').trim()
-      const newRemark = currentRemark
-        ? `${currentRemark} / Refer Invoice ${invoiceNo}`
-        : `Refer Invoice ${invoiceNo}`
-      updateRow(forRowId, { remark: newRemark })
+      let currentRemark = (row?.remark || '').trim()
+      for (const invoiceNo of invoiceNos) {
+        currentRemark = currentRemark
+          ? `${currentRemark} / Refer Invoice ${invoiceNo}`
+          : `Refer Invoice ${invoiceNo}`
+      }
+      updateRow(forRowId, { remark: currentRemark })
     }
     setInvoiceSearchModal({ open: false, forRowId: null, attachmentType: 'original', deliveryOrderRow: null })
     setInvoiceSearchList([])
     setInvoiceSearchQuery('')
-    setInvoiceSearchSelectedId(null)
+    setInvoiceSearchSelectedIds([])
+    if (addAnother) {
+      const row = grcs.find((r) => r.id === forRowId)
+      setDeliveryModal({
+        open: true,
+        rowId: forRowId,
+        dateLabel: row?.deliveryDate ? formatDate(row.deliveryDate) : '',
+        skipTimeStep: true,
+      })
+    }
   }
 
   const handleInvoiceSearchCancel = () => {
     setInvoiceSearchModal({ open: false, forRowId: null, attachmentType: 'original', deliveryOrderRow: null })
     setInvoiceSearchList([])
     setInvoiceSearchQuery('')
-    setInvoiceSearchSelectedId(null)
+    setInvoiceSearchSelectedIds([])
   }
 
   const closeAdditionalRemarkModal = () => {
@@ -1280,6 +1315,13 @@ export default function GRCTrackingPage() {
         status: insertedGrc.status || 'Billed',
         statusAt: insertedGrc.statusUpdatedAt,
       })
+      const attachmentInvoices = normalizeAttachmentInvoices(addGRCForm.attachmentInvoices)
+      for (const inv of attachmentInvoices) {
+        if (!inv?.invoiceNo) continue
+        const payload = buildInvoiceUpdateForDocLink(inv, insertedGrc, insertedGrc.grcNo)
+        const updateApi = inv._source === 'autocount' ? updateAutocountInvoice : updateInvoice
+        await updateApi(inv.id, payload)
+      }
       setGrcs((prev) => [...prev, { ...insertedGrc, linkedGrnId: insertedGrn.id }])
       setGrns((prev) => [...prev, { ...insertedGrn, linkedGrcId: insertedGrc.id }])
       setAddGRCFormOpen(false)
@@ -1744,6 +1786,15 @@ export default function GRCTrackingPage() {
                   placeholder="Optional"
                 />
               </div>
+              <InvoiceAttachmentSearch
+                esdInvoices={esdInvoicesList}
+                autocountInvoices={autocountInvoicesList}
+                query={addGRCForm.attachmentQuery || ''}
+                onQueryChange={(value) => setAddGRCFormField('attachmentQuery', value)}
+                selected={addGRCForm.attachmentInvoices || []}
+                onSelect={(invs) => setAddGRCFormField('attachmentInvoices', invs || [])}
+                multiple
+              />
             </div>
             {addGRCFormError && (
               <p className="mt-4 text-sm text-red-600 bg-red-50 border border-red-100 rounded-lg px-3 py-2">{addGRCFormError}</p>
@@ -1792,72 +1843,21 @@ export default function GRCTrackingPage() {
         onComplete={handleDeliveryTimeAndAttachmentComplete}
       />
 
-      {invoiceSearchModal.open && createPortal(
-        <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4 bg-black/50" onClick={handleInvoiceSearchCancel}>
-          <div
-            className="bg-white rounded-lg shadow-xl max-w-md w-full max-h-[85vh] overflow-hidden flex flex-col p-6"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h3 className="text-lg font-semibold text-slate-800 mb-2">Search invoice</h3>
-            <p className="text-slate-600 text-sm mb-3">Enter invoice number (from Invoice Tracking list):</p>
-            <input
-              type="text"
-              value={invoiceSearchQuery}
-              onChange={(e) => {
-                setInvoiceSearchQuery(e.target.value)
-                setInvoiceSearchSelectedId(null)
-              }}
-              placeholder="e.g. INV-001"
-              className="w-full py-2 px-3 border border-slate-300 rounded focus:ring-2 focus:ring-blue-900 mb-3"
-              aria-label="Invoice number search"
-            />
-            <div className="border border-slate-200 rounded overflow-auto flex-1 min-h-[120px] max-h-[200px] mb-4">
-              {getFilteredInvoicesForSearch().length === 0 ? (
-                <div className="p-4 text-slate-500 text-sm text-center">
-                  {invoiceSearchList.length === 0 ? 'No invoices in list.' : 'No match. Type to search.'}
-                </div>
-              ) : (
-                <ul className="divide-y divide-slate-100">
-                  {getFilteredInvoicesForSearch().map((inv) => (
-                    <li key={inv.id}>
-                      <button
-                        type="button"
-                        onClick={() => setInvoiceSearchSelectedId(inv.id)}
-                        className={`w-full text-left py-2 px-3 text-sm hover:bg-slate-50 ${
-                          invoiceSearchSelectedId === inv.id ? 'bg-blue-50 text-blue-900 font-medium' : 'text-slate-700'
-                        }`}
-                      >
-                        {inv.invoiceNo || inv.id}
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-            <p className="text-slate-500 text-xs mb-3">
-              {invoiceSearchSelectedId ? 'Selected: ' + (invoiceSearchList.find((r) => r.id === invoiceSearchSelectedId)?.invoiceNo || invoiceSearchSelectedId) : 'Select an invoice to confirm.'}
-            </p>
-            <div className="flex gap-2 justify-end">
-              <button
-                type="button"
-                onClick={handleInvoiceSearchCancel}
-                className="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={handleInvoiceSearchConfirm}
-                disabled={!(invoiceSearchSelectedId || getFilteredInvoicesForSearch().length === 1)}
-                className="px-6 py-2 bg-blue-900 text-white rounded-lg hover:bg-blue-800 font-medium disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                Confirm invoice selected
-              </button>
-            </div>
-          </div>
-        </div>,
-        document.body
-      )}
+      <InvoiceSearchModal
+        isOpen={invoiceSearchModal.open}
+        query={invoiceSearchQuery}
+        onQueryChange={setInvoiceSearchQuery}
+        invoices={invoiceSearchList}
+        selectedIds={invoiceSearchSelectedIds}
+        onToggleId={(id) =>
+          setInvoiceSearchSelectedIds((prev) =>
+            prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+          )
+        }
+        onCancel={handleInvoiceSearchCancel}
+        onConfirm={() => handleInvoiceSearchConfirm(false)}
+        onAddAnother={() => handleInvoiceSearchConfirm(true)}
+      />
 
       <NoticeModal
         isOpen={invoiceAttachedNotice.open}

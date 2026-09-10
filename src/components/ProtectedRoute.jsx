@@ -1,8 +1,12 @@
 import { Navigate, useLocation } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
+import { useMaintenanceMode } from '../context/MaintenanceModeContext'
+import Header from './Header'
+import MaintenanceScreen from './MaintenanceScreen'
 
 export default function ProtectedRoute({ children }) {
-  const { user, authReady } = useAuth()
+  const { user, authReady, isSuperuser } = useAuth()
+  const { maintenanceEnabled, maintenanceReady } = useMaintenanceMode()
   const location = useLocation()
   const pathname = location.pathname
   const returnTo = pathname + location.search
@@ -21,6 +25,15 @@ export default function ProtectedRoute({ children }) {
 
   if (user.mustChangePassword && pathname !== '/change-password') {
     return <Navigate to={`/change-password?returnTo=${encodeURIComponent(returnTo)}`} replace />
+  }
+
+  if (maintenanceReady && maintenanceEnabled && !isSuperuser) {
+    return (
+      <div className="min-h-screen flex flex-col bg-slate-100">
+        <Header />
+        <MaintenanceScreen />
+      </div>
+    )
   }
 
   return children

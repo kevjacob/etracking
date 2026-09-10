@@ -9,7 +9,13 @@
  * Run remote-schema.sql once in the online project SQL Editor before first sync.
  * If local Kong is unreachable, docker-restarts supabase_kong_* and retries
  * (disable with BACKUP_AUTO_RESTART_KONG=0).
+ *
+ * Mirror mode (removes remote rows not on local, then upserts):
+ *   node scripts/backup-to-remote.js --mirror
+ *   npm run backup:mirror
  */
+
+const MIRROR = process.argv.includes('--mirror') || process.env.BACKUP_MIRROR === '1'
 
 import { createClient } from '@supabase/supabase-js'
 import { execFile } from 'child_process'
@@ -121,15 +127,21 @@ const TABLES = [
   'warehouses',
   'app_users',
   'announcements',
+  'maintenance_mode',
   'invoices',
   'invoices_autocount',
   'credit_notes',
   'grn',
   'grc',
   'delivery_orders',
+  'keg_outlets',
+  'keg_movements',
+  'keg_stock_entries',
   'chat_messages',
   'status_history',
 ]
+
+const MIRROR_DELETE_ORDER = [...TABLES].reverse()
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -231,6 +243,70 @@ async function ensureLocalApi() {
   return false
 }
 
+async function fetchAllRemoteIds(table) {
+  const ids = []
+  let from = 0
+  const pageSize = 1000
+  while (true) {
+    const { data, error } = await withRetry(`${table}:remote-ids`, () =>
+      remote.from(table).select('id').range(from, from + pageSize - 1)
+    )
+    if (error) {
+      console.error(`[${table}] Remote id fetch error:`, errorText(error))
+      return null
+    }
+    if (!data?.length) break
+    ids.push(...data.map((r) => r.id))
+    if (data.length < pageSize) break
+    from += pageSize
+  }
+  return ids
+}
+
+async function deleteRemoteOrphans(table, localIds) {
+  const remoteIds = await fetchAllRemoteIds(table)
+  if (remoteIds === null) return { ok: false, deleted: 0 }
+  const localSet = new Set(localIds)
+  const toDelete = remoteIds.filter((id) => !localSet.has(id))
+  if (toDelete.length === 0) return { ok: true, deleted: 0 }
+
+  for (let i = 0; i < toDelete.length; i += 100) {
+    const batch = toDelete.slice(i, i + 100)
+    const { error } = await withRetry(`${table}:remote-delete`, () =>
+      remote.from(table).delete().in('id', batch)
+    )
+    if (error) {
+      console.error(`[${table}] Remote delete error:`, errorText(error))
+      return { ok: false, deleted: i }
+    }
+  }
+  return { ok: true, deleted: toDelete.length }
+}
+
+async function mirrorRemoveRemoteOnlyRows() {
+  let totalDeleted = 0
+  const failed = []
+  for (const table of MIRROR_DELETE_ORDER) {
+    const { data: rows, error: fetchError } = await withRetry(table, () => local.from(table).select('id'))
+    if (fetchError) {
+      console.error(`[${table}] Local id fetch error:`, errorText(fetchError))
+      failed.push(table)
+      continue
+    }
+    const localIds = (rows || []).map((r) => r.id)
+    const result = await deleteRemoteOrphans(table, localIds)
+    if (!result.ok) {
+      failed.push(table)
+      continue
+    }
+    if (result.deleted > 0) {
+      totalDeleted += result.deleted
+      console.log(`[mirror] ${table}: removed ${result.deleted} remote-only row(s)`)
+    }
+  }
+  return { totalDeleted, failed }
+}
+
 async function syncTable(table) {
   const { data: rows, error: fetchError } = await withRetry(table, () => local.from(table).select('*'))
   if (fetchError) {
@@ -267,20 +343,31 @@ async function syncAllTables() {
   return { total, failed, transientLocal }
 }
 
-function logBackupResult(total, failed) {
+function logBackupResult(total, failed, { mirrorDeleted = 0 } = {}) {
   if (failed.length) {
     console.error(`[backup] Failed tables: ${failed.join(', ')}`)
   }
   const failedNote = failed.length ? `, ${failed.length} failed` : ''
-  console.log(`[backup] Done at ${new Date().toISOString()} (${total} rows total${failedNote})`)
+  const mirrorNote = mirrorDeleted ? `, ${mirrorDeleted} remote-only rows removed` : ''
+  console.log(`[backup] Done at ${new Date().toISOString()} (${total} rows upserted${mirrorNote}${failedNote})`)
 }
 
-export async function runBackup() {
+export async function runBackup(options = {}) {
+  const mirror = options.mirror ?? MIRROR
   const started = new Date().toISOString()
-  console.log(`[backup] Started at ${started}`)
+  console.log(`[backup] Started at ${started}${mirror ? ' (mirror mode)' : ''}`)
   if (!(await ensureLocalApi())) {
     console.log(`[backup] Skipped at ${new Date().toISOString()} (local API unreachable)`)
     return 0
+  }
+  let mirrorDeleted = 0
+  if (mirror) {
+    console.log('[mirror] Removing remote rows that are not on local...')
+    const { totalDeleted, failed: mirrorFailed } = await mirrorRemoveRemoteOnlyRows()
+    mirrorDeleted = totalDeleted
+    if (mirrorFailed.length) {
+      console.error(`[mirror] Failed tables: ${mirrorFailed.join(', ')}`)
+    }
   }
   let { total, failed, transientLocal } = await syncAllTables()
   if (failed.length && transientLocal) {
@@ -289,7 +376,7 @@ export async function runBackup() {
       ;({ total, failed } = await syncAllTables())
     }
   }
-  logBackupResult(total, failed)
+  logBackupResult(total, failed, { mirrorDeleted })
   return total
 }
 

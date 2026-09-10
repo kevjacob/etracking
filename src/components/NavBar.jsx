@@ -8,6 +8,7 @@ const eTrackingItems = [
   { label: 'Credit Note Tracking', path: '/etracking/credit-note' },
   { label: 'Delivery Order Tracking', path: '/etracking/delivery-order' },
   { label: 'IDT Tracking', path: '/etracking/idt' },
+  { label: 'Keg Tracking', path: '/etracking/keg' },
   {
     label: 'Goods Return Tracking',
     children: [

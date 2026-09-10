@@ -11,7 +11,8 @@ import { fetchGRNs, insertGRN, updateGRN, deleteGRN } from '../api/grn'
 import { fetchGRCs, updateGRC } from '../api/grc'
 import { fetchInvoices, updateInvoice } from '../api/invoices'
 import { fetchInvoices as fetchAutocountInvoices, updateInvoice as updateAutocountInvoice } from '../api/autocountInvoices'
-import InvoiceAttachmentSearch from '../components/InvoiceAttachmentSearch'
+import InvoiceAttachmentSearch, { normalizeAttachmentInvoices } from '../components/InvoiceAttachmentSearch'
+import InvoiceSearchModal, { resolveSelectedInvoices } from '../components/InvoiceSearchModal'
 import DeliveryTimeAndAttachmentModal from '../components/DeliveryTimeAndAttachmentModal'
 import AdditionalRemarkModal from '../components/AdditionalRemarkModal'
 import AdditionalRemarkCell from '../components/AdditionalRemarkCell'
@@ -41,12 +42,13 @@ import {
   buildCombinedInvoiceLookup,
   buildInvoiceUpdateForDocLink,
   buildRemarkWithLinkedInvoice,
+  buildRemarkWithLinkedInvoices,
   hasLinkedInvoice,
   resolveLinkedInvoice,
 } from '../utils/invoiceLinkSync'
 
 function emptyAddGrnRow() {
-  return { grnDigits: '', grnDate: '', additionalRemark: '', attachmentQuery: '', attachmentInvoice: null }
+  return { grnDigits: '', grnDate: '', additionalRemark: '', attachmentQuery: '', attachmentInvoices: [] }
 }
 
 function getTodayDateStr() {
@@ -159,6 +161,8 @@ export default function GRNTrackingPage() {
   const [addGRNFormError, setAddGRNFormError] = useState('')
   const [addGRNApplyDateToAll, setAddGRNApplyDateToAll] = useState(false)
   const [addGRNConfirmOpen, setAddGRNConfirmOpen] = useState(false)
+  const [addGRNSubmitting, setAddGRNSubmitting] = useState(false)
+  const addGRNSubmittingRef = useRef(false)
   const [overwriteGRNModal, setOverwriteGRNModal] = useState({
     open: false,
     conflicts: [],
@@ -260,7 +264,7 @@ export default function GRNTrackingPage() {
     deliveryOrderRow: null,
   })
   const [invoiceSearchQuery, setInvoiceSearchQuery] = useState('')
-  const [invoiceSearchSelectedId, setInvoiceSearchSelectedId] = useState(null)
+  const [invoiceSearchSelectedIds, setInvoiceSearchSelectedIds] = useState([])
   const [invoiceSearchList, setInvoiceSearchList] = useState([])
   const [invoiceAttachedNotice, setInvoiceAttachedNotice] = useState({ open: false, message: '' })
   const [grnSearchQuery, setGrnSearchQuery] = useState('')
@@ -524,7 +528,7 @@ export default function GRNTrackingPage() {
     fetchInvoices().then((list) => {
       setInvoiceSearchList(list)
       setInvoiceSearchQuery('')
-      setInvoiceSearchSelectedId(null)
+      setInvoiceSearchSelectedIds([])
       setInvoiceSearchModal({
         open: true,
         forRowId: rowId,
@@ -542,7 +546,7 @@ export default function GRNTrackingPage() {
     )
   }
 
-  const handleInvoiceSearchConfirm = async () => {
+  const handleInvoiceSearchConfirm = async (addAnother = false) => {
     const { forRowId, attachmentType: type, deliveryOrderRow } = invoiceSearchModal
     if (!forRowId || !deliveryOrderRow) {
       setInvoiceSearchModal({ open: false, forRowId: null, attachmentType: 'original', deliveryOrderRow: null })
@@ -550,43 +554,54 @@ export default function GRNTrackingPage() {
       return
     }
     const filtered = getFilteredInvoicesForSearch()
-    const selectedInvoice = invoiceSearchSelectedId
-      ? invoiceSearchList.find((r) => r.id === invoiceSearchSelectedId)
-      : filtered.length === 1 ? filtered[0] : null
-    if ((type === 'original' || type === 'copy') && !selectedInvoice) return
-    const invoiceNo = selectedInvoice?.invoiceNo || selectedInvoice?.id
-    if (type === 'original' && selectedInvoice) {
-      await updateInvoice(selectedInvoice.id, {
-        status: deliveryOrderRow.status,
-        assignedDriverId: deliveryOrderRow.assignedDriverId,
-        assignedSalesmanId: deliveryOrderRow.assignedSalesmanId,
-        deliveryDate: deliveryOrderRow.deliveryDate || '',
-        deliverySlot: deliveryOrderRow.deliverySlot || '',
-      })
+    const selectedInvoices = resolveSelectedInvoices(invoiceSearchList, invoiceSearchSelectedIds, filtered)
+    if ((type === 'original' || type === 'copy') && selectedInvoices.length === 0) return
+    const invoiceNos = selectedInvoices.map((inv) => inv.invoiceNo || inv.id)
+    if (type === 'original') {
+      for (const selectedInvoice of selectedInvoices) {
+        await updateInvoice(selectedInvoice.id, {
+          status: deliveryOrderRow.status,
+          assignedDriverId: deliveryOrderRow.assignedDriverId,
+          assignedSalesmanId: deliveryOrderRow.assignedSalesmanId,
+          deliveryDate: deliveryOrderRow.deliveryDate || '',
+          deliverySlot: deliveryOrderRow.deliverySlot || '',
+        })
+      }
       setInvoiceAttachedNotice({
         open: true,
-        message: `Invoice ${invoiceNo} has been updated with GRN ${deliveryOrderRow.grnNo || forRowId}.`,
+        message: `Invoice ${invoiceNos.join(', ')} has been updated with GRN ${deliveryOrderRow.grnNo || forRowId}.`,
       })
     }
-    if (type === 'copy' && selectedInvoice) {
+    if (type === 'copy') {
       const row = grns.find((r) => r.id === forRowId)
-      const currentRemark = (row?.remark || '').trim()
-      const newRemark = currentRemark
-        ? `${currentRemark} / Refer Invoice ${invoiceNo}`
-        : `Refer Invoice ${invoiceNo}`
-      updateRow(forRowId, { remark: newRemark })
+      let currentRemark = (row?.remark || '').trim()
+      for (const invoiceNo of invoiceNos) {
+        currentRemark = currentRemark
+          ? `${currentRemark} / Refer Invoice ${invoiceNo}`
+          : `Refer Invoice ${invoiceNo}`
+      }
+      updateRow(forRowId, { remark: currentRemark })
     }
     setInvoiceSearchModal({ open: false, forRowId: null, attachmentType: 'original', deliveryOrderRow: null })
     setInvoiceSearchList([])
     setInvoiceSearchQuery('')
-    setInvoiceSearchSelectedId(null)
+    setInvoiceSearchSelectedIds([])
+    if (addAnother) {
+      const row = grns.find((r) => r.id === forRowId)
+      setDeliveryModal({
+        open: true,
+        rowId: forRowId,
+        dateLabel: row?.deliveryDate ? formatDate(row.deliveryDate) : '',
+        skipTimeStep: true,
+      })
+    }
   }
 
   const handleInvoiceSearchCancel = () => {
     setInvoiceSearchModal({ open: false, forRowId: null, attachmentType: 'original', deliveryOrderRow: null })
     setInvoiceSearchList([])
     setInvoiceSearchQuery('')
-    setInvoiceSearchSelectedId(null)
+    setInvoiceSearchSelectedIds([])
   }
 
   const closeAdditionalRemarkModal = () => {
@@ -1289,7 +1304,7 @@ export default function GRNTrackingPage() {
           grnNo,
           grnDate: addGRNApplyDateToAll ? firstDate : (r.grnDate || ''),
           additionalRemark: (r.additionalRemark || '').trim(),
-          attachmentInvoice: r.attachmentInvoice || null,
+          attachmentInvoices: normalizeAttachmentInvoices(r.attachmentInvoices),
         }
       })
       .filter(Boolean)
@@ -1308,7 +1323,8 @@ export default function GRNTrackingPage() {
   }
 
   const persistNewGrn = async (entry) => {
-    const remark = buildRemarkWithLinkedInvoice(entry.attachmentInvoice?.invoiceNo, '')
+    const attachmentInvoices = normalizeAttachmentInvoices(entry.attachmentInvoices)
+    const remark = buildRemarkWithLinkedInvoices(attachmentInvoices.map((inv) => inv.invoiceNo), '')
     const discrepancy = saveAdditionalRemark(entry.additionalRemark)
     const newRow = createGRN({ grnNo: entry.grnNo, grnDate: entry.grnDate, remark, discrepancy })
     const inserted = await insertGRN(newRow)
@@ -1319,10 +1335,27 @@ export default function GRNTrackingPage() {
       status: inserted.status || 'Billed',
       statusAt: inserted.statusUpdatedAt,
     })
-    if (entry.attachmentInvoice) {
-      await linkGrnToInvoice(inserted, entry.attachmentInvoice)
+    for (const inv of attachmentInvoices) {
+      await linkGrnToInvoice(inserted, inv)
     }
     return inserted
+  }
+
+  const grnNoKey = (value) => String(value || '').trim().toUpperCase()
+
+  const findExistingGrn = (list, grnNo) => {
+    const key = grnNoKey(grnNo)
+    if (!key) return null
+    return (list || []).find((r) => grnNoKey(r.grnNo) === key) || null
+  }
+
+  const appendGrnIfNew = (inserted) => {
+    if (!inserted) return
+    setGrns((prev) => {
+      if (inserted.id && prev.some((r) => r.id === inserted.id)) return prev
+      if (findExistingGrn(prev, inserted.grnNo)) return prev
+      return [...prev, inserted]
+    })
   }
 
   const handleAddGRNProceed = () => {
@@ -1348,27 +1381,47 @@ export default function GRNTrackingPage() {
   }
 
   const handleAddGRNConfirmYes = async () => {
-    const entries = getAddGRNEntries()
-    const conflicts = []
-    const nonConflicting = []
-    for (const e of entries) {
-      const existing = grns.find((r) => (r.grnNo || '').trim() === (e.grnNo || '').trim())
-      if (existing) conflicts.push({ existingRow: existing, newEntry: e })
-      else nonConflicting.push(e)
-    }
-    if (conflicts.length > 0) {
+    if (addGRNSubmittingRef.current) return
+    addGRNSubmittingRef.current = true
+    setAddGRNSubmitting(true)
+    try {
+      const entries = getAddGRNEntries()
+      const seen = new Set()
+      const uniqueEntries = []
+      for (const e of entries) {
+        const key = grnNoKey(e.grnNo)
+        if (!key || seen.has(key)) continue
+        seen.add(key)
+        uniqueEntries.push(e)
+      }
+      const conflicts = []
+      const nonConflicting = []
+      for (const e of uniqueEntries) {
+        const existing = findExistingGrn(grns, e.grnNo)
+        if (existing) conflicts.push({ existingRow: existing, newEntry: e })
+        else nonConflicting.push(e)
+      }
+      if (conflicts.length > 0) {
+        setAddGRNConfirmOpen(false)
+        setOverwriteGRNModal({ open: true, conflicts, nonConflicting, index: 0 })
+        return
+      }
+      for (const e of nonConflicting) {
+        const inserted = await persistNewGrn(e)
+        appendGrnIfNew(inserted)
+      }
+      setAddGRNFormOpen(false)
       setAddGRNConfirmOpen(false)
-      setOverwriteGRNModal({ open: true, conflicts, nonConflicting, index: 0 })
-      return
+      setAddGRNRows([emptyAddGrnRow()])
+      setAddGRNApplyDateToAll(false)
+    } catch (e) {
+      console.error('Create GRN error:', e)
+      setAddGRNFormError(e.message || 'Failed to create GRN.')
+      setAddGRNConfirmOpen(false)
+    } finally {
+      addGRNSubmittingRef.current = false
+      setAddGRNSubmitting(false)
     }
-    for (const e of nonConflicting) {
-      const inserted = await persistNewGrn(e)
-      setGrns((prev) => [...prev, inserted])
-    }
-    setAddGRNFormOpen(false)
-    setAddGRNConfirmOpen(false)
-    setAddGRNRows([emptyAddGrnRow()])
-    setAddGRNApplyDateToAll(false)
   }
 
   const getGRNRowDisplay = (row) => {
@@ -1422,7 +1475,7 @@ export default function GRNTrackingPage() {
     } else {
       for (const e of nonConflicting) {
         const inserted = await persistNewGrn(e)
-        setGrns((prev) => [...prev, inserted])
+        appendGrnIfNew(inserted)
       }
       setOverwriteGRNModal({ open: false, conflicts: [], nonConflicting: [], index: 0 })
       setAddGRNFormOpen(false)
@@ -1439,7 +1492,7 @@ export default function GRNTrackingPage() {
     } else {
       for (const e of nonConflicting) {
         const inserted = await persistNewGrn(e)
-        setGrns((prev) => [...prev, inserted])
+        appendGrnIfNew(inserted)
       }
       setOverwriteGRNModal({ open: false, conflicts: [], nonConflicting: [], index: 0 })
       setAddGRNFormOpen(false)
@@ -1450,6 +1503,7 @@ export default function GRNTrackingPage() {
   }
 
   const handleAddGRNConfirmNo = () => {
+    if (addGRNSubmitting) return
     setAddGRNConfirmOpen(false)
   }
 
@@ -1848,8 +1902,9 @@ export default function GRNTrackingPage() {
                   autocountInvoices={autocountInvoicesList}
                   query={addGRNRows[0]?.attachmentQuery || ''}
                   onQueryChange={(value) => setAddGRNRow(0, 'attachmentQuery', value)}
-                  selected={addGRNRows[0]?.attachmentInvoice || null}
-                  onSelect={(inv) => setAddGRNRow(0, 'attachmentInvoice', inv)}
+                  selected={addGRNRows[0]?.attachmentInvoices || []}
+                  onSelect={(invs) => setAddGRNRow(0, 'attachmentInvoices', invs || [])}
+                  multiple
                 />
               </div>
             ) : (
@@ -1941,8 +1996,10 @@ export default function GRNTrackingPage() {
               ))}
             </ul>
             <div className="flex justify-end gap-2">
-              <button type="button" onClick={handleAddGRNConfirmNo} className="px-4 py-2 border border-slate-300 rounded-lg hover:bg-slate-50">No</button>
-              <button type="button" onClick={handleAddGRNConfirmYes} className="px-4 py-2 bg-blue-900 text-white rounded-lg hover:bg-blue-800">Yes</button>
+              <button type="button" onClick={handleAddGRNConfirmNo} disabled={addGRNSubmitting} className="px-4 py-2 border border-slate-300 rounded-lg hover:bg-slate-50 disabled:opacity-50">No</button>
+              <button type="button" onClick={handleAddGRNConfirmYes} disabled={addGRNSubmitting} className="px-4 py-2 bg-blue-900 text-white rounded-lg hover:bg-blue-800 disabled:opacity-50 disabled:cursor-not-allowed">
+                {addGRNSubmitting ? 'Creating…' : 'Yes'}
+              </button>
             </div>
           </div>
         </div>
@@ -2002,72 +2059,21 @@ export default function GRNTrackingPage() {
         onComplete={handleDeliveryTimeAndAttachmentComplete}
       />
 
-      {invoiceSearchModal.open && createPortal(
-        <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4 bg-black/50" onClick={handleInvoiceSearchCancel}>
-          <div
-            className="bg-white rounded-lg shadow-xl max-w-md w-full max-h-[85vh] overflow-hidden flex flex-col p-6"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h3 className="text-lg font-semibold text-slate-800 mb-2">Search invoice</h3>
-            <p className="text-slate-600 text-sm mb-3">Enter invoice number (from Invoice Tracking list):</p>
-            <input
-              type="text"
-              value={invoiceSearchQuery}
-              onChange={(e) => {
-                setInvoiceSearchQuery(e.target.value)
-                setInvoiceSearchSelectedId(null)
-              }}
-              placeholder="e.g. INV-001"
-              className="w-full py-2 px-3 border border-slate-300 rounded focus:ring-2 focus:ring-blue-900 mb-3"
-              aria-label="Invoice number search"
-            />
-            <div className="border border-slate-200 rounded overflow-auto flex-1 min-h-[120px] max-h-[200px] mb-4">
-              {getFilteredInvoicesForSearch().length === 0 ? (
-                <div className="p-4 text-slate-500 text-sm text-center">
-                  {invoiceSearchList.length === 0 ? 'No invoices in list.' : 'No match. Type to search.'}
-                </div>
-              ) : (
-                <ul className="divide-y divide-slate-100">
-                  {getFilteredInvoicesForSearch().map((inv) => (
-                    <li key={inv.id}>
-                      <button
-                        type="button"
-                        onClick={() => setInvoiceSearchSelectedId(inv.id)}
-                        className={`w-full text-left py-2 px-3 text-sm hover:bg-slate-50 ${
-                          invoiceSearchSelectedId === inv.id ? 'bg-blue-50 text-blue-900 font-medium' : 'text-slate-700'
-                        }`}
-                      >
-                        {inv.invoiceNo || inv.id}
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-            <p className="text-slate-500 text-xs mb-3">
-              {invoiceSearchSelectedId ? 'Selected: ' + (invoiceSearchList.find((r) => r.id === invoiceSearchSelectedId)?.invoiceNo || invoiceSearchSelectedId) : 'Select an invoice to confirm.'}
-            </p>
-            <div className="flex gap-2 justify-end">
-              <button
-                type="button"
-                onClick={handleInvoiceSearchCancel}
-                className="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={handleInvoiceSearchConfirm}
-                disabled={!(invoiceSearchSelectedId || getFilteredInvoicesForSearch().length === 1)}
-                className="px-6 py-2 bg-blue-900 text-white rounded-lg hover:bg-blue-800 font-medium disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                Confirm invoice selected
-              </button>
-            </div>
-          </div>
-        </div>,
-        document.body
-      )}
+      <InvoiceSearchModal
+        isOpen={invoiceSearchModal.open}
+        query={invoiceSearchQuery}
+        onQueryChange={setInvoiceSearchQuery}
+        invoices={invoiceSearchList}
+        selectedIds={invoiceSearchSelectedIds}
+        onToggleId={(id) =>
+          setInvoiceSearchSelectedIds((prev) =>
+            prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+          )
+        }
+        onCancel={handleInvoiceSearchCancel}
+        onConfirm={() => handleInvoiceSearchConfirm(false)}
+        onAddAnother={() => handleInvoiceSearchConfirm(true)}
+      />
 
       <NoticeModal
         isOpen={invoiceAttachedNotice.open}

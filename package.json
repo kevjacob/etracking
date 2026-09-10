@@ -8,6 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "backup": "node scripts/backup-to-remote.js",
+    "backup:mirror": "node scripts/backup-to-remote.js --mirror",
     "backup:daemon": "node scripts/run-backup-daemon.js"
   },
   "dependencies": {

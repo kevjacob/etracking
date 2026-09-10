@@ -43,6 +43,13 @@ export function buildRemarkWithLinkedInvoice(invoiceNo, extraRemark) {
   return extra ? `${inv}${REMARK_SEP}${extra}` : inv
 }
 
+export function buildRemarkWithLinkedInvoices(invoiceNos, extraRemark) {
+  const nos = (invoiceNos || []).map((n) => String(n || '').trim()).filter(Boolean)
+  const extra = String(extraRemark || '').trim()
+  if (nos.length === 0) return extra
+  return extra ? `${nos.join(REMARK_SEP)}${REMARK_SEP}${extra}` : nos.join(REMARK_SEP)
+}
+
 export function buildInvoiceRemarkWithLinkedDoc(docNo, extraRemark) {
   const doc = String(docNo || '').trim()
   const extra = String(extraRemark || '').trim()

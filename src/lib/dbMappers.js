@@ -45,6 +45,16 @@ const SNAKE_MAP = {
   fromStatusAt: 'from_status_at',
   toStatusAt: 'to_status_at',
   daysElapsed: 'days_elapsed',
+  docNo: 'doc_no',
+  entryDate: 'entry_date',
+  movementType: 'movement_type',
+  warehouseId: 'warehouse_id',
+  warehouseName: 'warehouse_name',
+  outletId: 'outlet_id',
+  outletName: 'outlet_name',
+  entryType: 'entry_type',
+  returnTo: 'return_to',
+  referenceNo: 'reference_no',
 }
 
 const CAMEL_MAP = {}
@@ -61,6 +71,7 @@ const DATE_COLUMNS = new Set([
   'grc_date',
   'idt_date',
   'delivery_order_date',
+  'entry_date',
 ])
 
 function toSnakeCase(obj) {

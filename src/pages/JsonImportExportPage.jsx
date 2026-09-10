@@ -11,6 +11,9 @@ const BACKUP_KEYS = [
   'etracking_grn',
   'etracking_grc',
   'etracking_idt',
+  'etracking_keg_outlets',
+  'etracking_keg_movements',
+  'etracking_keg_stock_entries',
 ]
 
 function downloadJson(data, filename) {

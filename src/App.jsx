@@ -19,6 +19,7 @@ import DeliveryOrderTrackingPage from './pages/DeliveryOrderTrackingPage'
 import GRNTrackingPage from './pages/GRNTrackingPage'
 import GRCTrackingPage from './pages/GRCTrackingPage'
 import IDTTrackingPage from './pages/IDTTrackingPage'
+import KegTrackingPage from './pages/KegTrackingPage'
 import LeadTimeAgingReportPage from './pages/LeadTimeAgingReportPage'
 
 export default function App() {
@@ -43,6 +44,7 @@ export default function App() {
         <Route path="etracking/grn" element={<GRNTrackingPage />} />
         <Route path="etracking/grc" element={<GRCTrackingPage />} />
         <Route path="etracking/idt" element={<IDTTrackingPage />} />
+        <Route path="etracking/keg" element={<KegTrackingPage />} />
         <Route path="report/lead-time-aging" element={<LeadTimeAgingReportPage />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
