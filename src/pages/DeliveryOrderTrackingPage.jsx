@@ -169,6 +169,8 @@ export default function DeliveryOrderTrackingPage() {
   const [addDeliveryOrderApplyDateToAll, setAddDeliveryOrderApplyDateToAll] = useState(false)
   const [addDeliveryOrderConfirmOpen, setAddDeliveryOrderConfirmOpen] = useState(false)
   const [addDeliveryOrderFormError, setAddDeliveryOrderFormError] = useState('')
+  const [addDeliveryOrderSubmitting, setAddDeliveryOrderSubmitting] = useState(false)
+  const addDeliveryOrderSubmittingRef = useRef(false)
   const [overwriteDeliveryOrderModal, setOverwriteDeliveryOrderModal] = useState({
     open: false,
     conflicts: [],
@@ -1394,28 +1396,63 @@ export default function DeliveryOrderTrackingPage() {
     setAddDeliveryOrderConfirmOpen(true)
   }
 
+  const doNoKey = (value) => String(value || '').trim().toUpperCase()
+
+  const findExistingDo = (list, deliveryOrderNo) => {
+    const key = doNoKey(deliveryOrderNo)
+    if (!key) return null
+    return (list || []).find((r) => doNoKey(r.deliveryOrderNo) === key) || null
+  }
+
+  const appendDoIfNew = (inserted) => {
+    if (!inserted) return
+    setDeliveryOrders((prev) => {
+      if (inserted.id && prev.some((r) => r.id === inserted.id)) return prev
+      if (findExistingDo(prev, inserted.deliveryOrderNo)) return prev
+      return [...prev, inserted]
+    })
+  }
+
   const handleAddDeliveryOrderConfirmYes = async () => {
-    const entries = getAddDeliveryOrderEntries()
-    const conflicts = []
-    const nonConflicting = []
-    for (const e of entries) {
-      const existing = deliveryOrders.find((r) => (r.deliveryOrderNo || '').trim() === (e.deliveryOrderNo || '').trim())
-      if (existing) conflicts.push({ existingRow: existing, newEntry: e })
-      else nonConflicting.push(e)
-    }
-    if (conflicts.length > 0) {
-      setAddDeliveryOrderConfirmOpen(false)
-      setOverwriteDeliveryOrderModal({ open: true, conflicts, nonConflicting, index: 0 })
-      return
-    }
-    for (const e of nonConflicting) {
-      const inserted = await persistNewDeliveryOrder(e)
-      setDeliveryOrders((prev) => [...prev, inserted])
-    }
-    setAddDeliveryOrderFormOpen(false)
+    if (addDeliveryOrderSubmittingRef.current) return
+    addDeliveryOrderSubmittingRef.current = true
+    setAddDeliveryOrderSubmitting(true)
     setAddDeliveryOrderConfirmOpen(false)
-    setAddDeliveryOrderRows([emptyAddDoRow()])
-    setAddDeliveryOrderApplyDateToAll(false)
+    try {
+      const entries = getAddDeliveryOrderEntries()
+      const seen = new Set()
+      const uniqueEntries = []
+      for (const e of entries) {
+        const key = doNoKey(e.deliveryOrderNo)
+        if (!key || seen.has(key)) continue
+        seen.add(key)
+        uniqueEntries.push(e)
+      }
+      const conflicts = []
+      const nonConflicting = []
+      for (const e of uniqueEntries) {
+        const existing = findExistingDo(deliveryOrders, e.deliveryOrderNo)
+        if (existing) conflicts.push({ existingRow: existing, newEntry: e })
+        else nonConflicting.push(e)
+      }
+      if (conflicts.length > 0) {
+        setOverwriteDeliveryOrderModal({ open: true, conflicts, nonConflicting, index: 0 })
+        return
+      }
+      for (const e of nonConflicting) {
+        const inserted = await persistNewDeliveryOrder(e)
+        appendDoIfNew(inserted)
+      }
+      setAddDeliveryOrderFormOpen(false)
+      setAddDeliveryOrderRows([emptyAddDoRow()])
+      setAddDeliveryOrderApplyDateToAll(false)
+    } catch (e) {
+      console.error('Create delivery order error:', e)
+      setAddDeliveryOrderFormError(e.message || 'Failed to create delivery order.')
+    } finally {
+      addDeliveryOrderSubmittingRef.current = false
+      setAddDeliveryOrderSubmitting(false)
+    }
   }
 
   const getDeliveryOrderRowDisplay = (row) => {
@@ -1469,7 +1506,7 @@ export default function DeliveryOrderTrackingPage() {
     } else {
       for (const e of nonConflicting) {
         const inserted = await persistNewDeliveryOrder(e)
-        setDeliveryOrders((prev) => [...prev, inserted])
+        appendDoIfNew(inserted)
       }
       setOverwriteDeliveryOrderModal({ open: false, conflicts: [], nonConflicting: [], index: 0 })
       setAddDeliveryOrderFormOpen(false)
@@ -1486,7 +1523,7 @@ export default function DeliveryOrderTrackingPage() {
     } else {
       for (const e of nonConflicting) {
         const inserted = await persistNewDeliveryOrder(e)
-        setDeliveryOrders((prev) => [...prev, inserted])
+        appendDoIfNew(inserted)
       }
       setOverwriteDeliveryOrderModal({ open: false, conflicts: [], nonConflicting: [], index: 0 })
       setAddDeliveryOrderFormOpen(false)
@@ -1497,6 +1534,7 @@ export default function DeliveryOrderTrackingPage() {
   }
 
   const handleAddDeliveryOrderConfirmNo = () => {
+    if (addDeliveryOrderSubmitting) return
     setAddDeliveryOrderConfirmOpen(false)
   }
 
@@ -1987,8 +2025,10 @@ export default function DeliveryOrderTrackingPage() {
               ))}
             </ul>
             <div className="flex justify-end gap-2">
-              <button type="button" onClick={handleAddDeliveryOrderConfirmNo} className="px-4 py-2 border border-slate-300 rounded-lg hover:bg-slate-50">No</button>
-              <button type="button" onClick={handleAddDeliveryOrderConfirmYes} className="px-4 py-2 bg-blue-900 text-white rounded-lg hover:bg-blue-800">Yes</button>
+              <button type="button" onClick={handleAddDeliveryOrderConfirmNo} disabled={addDeliveryOrderSubmitting} className="px-4 py-2 border border-slate-300 rounded-lg hover:bg-slate-50 disabled:opacity-50">No</button>
+              <button type="button" onClick={handleAddDeliveryOrderConfirmYes} disabled={addDeliveryOrderSubmitting} className="px-4 py-2 bg-blue-900 text-white rounded-lg hover:bg-blue-800 disabled:opacity-50 disabled:cursor-not-allowed">
+                {addDeliveryOrderSubmitting ? 'Creating…' : 'Yes'}
+              </button>
             </div>
           </div>
         </div>
