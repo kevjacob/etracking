@@ -4,7 +4,7 @@ const ESD_INVOICE_RE = /^\d+$/
 const IV_INVOICE_RE = /^IV\d{10}$/i
 const T_INVOICE_RE = /^T\d{5}$/i
 const GRN_NO_RE = /^GRN\d{5}$/i
-const DO_NO_RE = /^DO\d+$/i
+const DO_NO_RE = /^DO\s?\d+$/i
 
 export function isLinkableInvoiceNo(text) {
   const value = String(text ?? '').trim()

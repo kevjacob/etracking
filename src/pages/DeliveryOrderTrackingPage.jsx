@@ -13,7 +13,13 @@ import { fetchInvoices as fetchAutocountInvoices, updateInvoice as updateAutocou
 import InvoiceAttachmentSearch, { normalizeAttachmentInvoices } from '../components/InvoiceAttachmentSearch'
 import InvoiceSearchModal, { resolveSelectedInvoices } from '../components/InvoiceSearchModal'
 import LinkedTrackingRemark from '../components/LinkedTrackingRemark'
-import { buildDocNoLookup } from '../utils/grcGrnSync'
+import {
+  buildDocNoLookup,
+  DELIVERY_ORDER_NO_PREFIX,
+  DO_DIGIT_LEN,
+  formatDeliveryOrderNo,
+  normalizeDigits,
+} from '../utils/grcGrnSync'
 import {
   buildCombinedInvoiceLookup,
   buildInvoiceUpdateForDocLink,
@@ -113,7 +119,7 @@ import { defaultAdditionalRemark, getAdditionalRemarkText, saveAdditionalRemark 
 
 function emptyAddDoRow() {
   return {
-    deliveryOrderNo: '',
+    doDigits: '',
     deliveryOrderDate: '',
     additionalRemark: '',
     attachmentQuery: '',
@@ -162,6 +168,7 @@ export default function DeliveryOrderTrackingPage() {
   const [addDeliveryOrderRows, setAddDeliveryOrderRows] = useState([emptyAddDoRow()])
   const [addDeliveryOrderApplyDateToAll, setAddDeliveryOrderApplyDateToAll] = useState(false)
   const [addDeliveryOrderConfirmOpen, setAddDeliveryOrderConfirmOpen] = useState(false)
+  const [addDeliveryOrderFormError, setAddDeliveryOrderFormError] = useState('')
   const [overwriteDeliveryOrderModal, setOverwriteDeliveryOrderModal] = useState({
     open: false,
     conflicts: [],
@@ -1299,6 +1306,10 @@ export default function DeliveryOrderTrackingPage() {
   }
 
   const setAddDeliveryOrderRow = (index, field, value) => {
+    setAddDeliveryOrderFormError('')
+    if (field === 'doDigits') {
+      value = normalizeDigits(value, DO_DIGIT_LEN)
+    }
     setAddDeliveryOrderRows((prev) => {
       const next = prev.map((r, i) => (i === index ? { ...r, [field]: value } : r))
       if (addDeliveryOrderApplyDateToAll && field === 'deliveryOrderDate' && index === 0) {
@@ -1311,13 +1322,17 @@ export default function DeliveryOrderTrackingPage() {
   const getAddDeliveryOrderEntries = () => {
     const firstDate = addDeliveryOrderApplyDateToAll ? (addDeliveryOrderRows[0]?.deliveryOrderDate || '') : null
     return addDeliveryOrderRows
-      .map((r) => ({
-        deliveryOrderNo: r.deliveryOrderNo?.trim(),
-        deliveryOrderDate: addDeliveryOrderApplyDateToAll ? firstDate : (r.deliveryOrderDate || ''),
-        additionalRemark: (r.additionalRemark || '').trim(),
-        attachmentInvoices: normalizeAttachmentInvoices(r.attachmentInvoices),
-      }))
-      .filter((e) => e.deliveryOrderNo)
+      .map((r) => {
+        const deliveryOrderNo = formatDeliveryOrderNo(r.doDigits)
+        if (!deliveryOrderNo) return null
+        return {
+          deliveryOrderNo,
+          deliveryOrderDate: addDeliveryOrderApplyDateToAll ? firstDate : (r.deliveryOrderDate || ''),
+          additionalRemark: (r.additionalRemark || '').trim(),
+          attachmentInvoices: normalizeAttachmentInvoices(r.attachmentInvoices),
+        }
+      })
+      .filter(Boolean)
   }
 
   const linkDoToInvoice = async (doRow, attachmentInvoice) => {
@@ -1352,11 +1367,29 @@ export default function DeliveryOrderTrackingPage() {
   }
 
   const handleAddDeliveryOrderProceed = () => {
+    setAddDeliveryOrderFormError('')
+    const rowsWithDigits = addDeliveryOrderRows.filter((r) => normalizeDigits(r.doDigits, DO_DIGIT_LEN).length > 0)
+    if (rowsWithDigits.length === 0) {
+      setAddDeliveryOrderFormError('Enter at least one Delivery Order number (5 digits).')
+      return
+    }
+    for (const r of rowsWithDigits) {
+      if (!formatDeliveryOrderNo(r.doDigits)) {
+        setAddDeliveryOrderFormError('Each Delivery Order number must be exactly 5 digits.')
+        return
+      }
+    }
     const entries = getAddDeliveryOrderEntries()
     if (entries.length === 0) return
-    if (addDeliveryOrderApplyDateToAll && !addDeliveryOrderRows[0]?.deliveryOrderDate) return
+    if (addDeliveryOrderApplyDateToAll && !addDeliveryOrderRows[0]?.deliveryOrderDate) {
+      setAddDeliveryOrderFormError('Delivery Order date is required.')
+      return
+    }
     for (const e of entries) {
-      if (!addDeliveryOrderApplyDateToAll && !e.deliveryOrderDate) return
+      if (!addDeliveryOrderApplyDateToAll && !e.deliveryOrderDate) {
+        setAddDeliveryOrderFormError('Each Delivery Order needs a date.')
+        return
+      }
     }
     setAddDeliveryOrderConfirmOpen(true)
   }
@@ -1470,6 +1503,7 @@ export default function DeliveryOrderTrackingPage() {
   const handleAddDeliveryOrderFormClose = () => {
     setAddDeliveryOrderFormOpen(false)
     setAddDeliveryOrderConfirmOpen(false)
+    setAddDeliveryOrderFormError('')
     setOverwriteDeliveryOrderModal({ open: false, conflicts: [], nonConflicting: [], index: 0 })
     setAddDeliveryOrderRows([emptyAddDoRow()])
     setAddDeliveryOrderApplyDateToAll(false)
@@ -1822,13 +1856,18 @@ export default function DeliveryOrderTrackingPage() {
               <div className="space-y-4">
                 <div>
                   <label className="block text-sm font-medium text-slate-700 mb-1">Delivery Order No</label>
-                  <input
-                    type="text"
-                    value={addDeliveryOrderRows[0]?.deliveryOrderNo || ''}
-                    onChange={(e) => setAddDeliveryOrderRow(0, 'deliveryOrderNo', e.target.value)}
-                    className="w-full py-2 px-3 border border-slate-300 rounded focus:ring-2 focus:ring-blue-900"
-                    placeholder="e.g. DO-001"
-                  />
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-semibold text-slate-600 shrink-0">{DELIVERY_ORDER_NO_PREFIX}</span>
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      maxLength={DO_DIGIT_LEN}
+                      value={addDeliveryOrderRows[0]?.doDigits || ''}
+                      onChange={(e) => setAddDeliveryOrderRow(0, 'doDigits', e.target.value)}
+                      className="flex-1 py-2 px-3 border border-slate-300 rounded focus:ring-2 focus:ring-blue-900 font-mono"
+                      placeholder="12345"
+                    />
+                  </div>
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-slate-700 mb-1">Delivery Order Date</label>
@@ -1884,13 +1923,18 @@ export default function DeliveryOrderTrackingPage() {
                     {addDeliveryOrderRows.map((row, i) => (
                       <tr key={i} className="border-t border-slate-200">
                         <td className="py-2 px-3">
-                          <input
-                            type="text"
-                            value={row.deliveryOrderNo}
-                            onChange={(e) => setAddDeliveryOrderRow(i, 'deliveryOrderNo', e.target.value)}
-                            className="w-full py-1.5 px-2 border border-slate-300 rounded text-sm"
-                            placeholder={`No. ${i + 1}`}
-                          />
+                          <div className="flex items-center gap-1">
+                            <span className="text-xs font-semibold text-slate-600 shrink-0">{DELIVERY_ORDER_NO_PREFIX}</span>
+                            <input
+                              type="text"
+                              inputMode="numeric"
+                              maxLength={DO_DIGIT_LEN}
+                              value={row.doDigits}
+                              onChange={(e) => setAddDeliveryOrderRow(i, 'doDigits', e.target.value)}
+                              className="w-full py-1.5 px-2 border border-slate-300 rounded text-sm font-mono"
+                              placeholder="12345"
+                            />
+                          </div>
                         </td>
                         <td className="py-2 px-3">
                           <input
@@ -1916,6 +1960,9 @@ export default function DeliveryOrderTrackingPage() {
                   </tbody>
                 </table>
               </div>
+            )}
+            {addDeliveryOrderFormError && (
+              <p className="mt-4 text-sm text-red-600 bg-red-50 border border-red-100 rounded-lg px-3 py-2">{addDeliveryOrderFormError}</p>
             )}
             <div className="flex justify-end gap-2 mt-6">
               <button type="button" onClick={handleAddDeliveryOrderFormClose} className="px-4 py-2 border border-slate-300 rounded-lg hover:bg-slate-50">Cancel</button>

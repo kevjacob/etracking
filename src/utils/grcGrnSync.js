@@ -6,6 +6,7 @@ export const GRC_DIGIT_LEN = 10
 export const DO_DIGIT_LEN = 5
 export const GRC_NO_PREFIX = 'GRC'
 export const GRN_NO_PREFIX = 'GRN'
+export const DELIVERY_ORDER_NO_PREFIX = 'DO '
 export const REMARK_SEP = ' | '
 
 export function splitRemarkParts(remark) {
@@ -30,6 +31,12 @@ export function formatDoNo(digits) {
 
 /** Alias for standalone GRN add form. */
 export const formatGrnNo = formatDoNo
+
+export function formatDeliveryOrderNo(digits) {
+  const d = normalizeDigits(digits, DO_DIGIT_LEN)
+  if (d.length !== DO_DIGIT_LEN) return null
+  return `${DELIVERY_ORDER_NO_PREFIX}${d}`
+}
 
 export function buildGrcRemark(doNo, doDate, additionalRemark) {
   const base = [doNo, doDate || ''].join(REMARK_SEP)
