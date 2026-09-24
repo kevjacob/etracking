@@ -3,6 +3,7 @@
  */
 import { supabase, isSupabaseConfigured } from '../supabaseClient'
 import { toSnakeCase, fromSnakeCase } from '../lib/dbMappers'
+import { fetchAllRows } from '../lib/fetchAllRows'
 
 const STORAGE_KEY = 'etracking_invoices'
 
@@ -31,9 +32,10 @@ function saveInvoices(invoices) {
 
 export async function fetchInvoices() {
   if (isSupabaseConfigured()) {
-    const { data, error } = await supabase.from('invoices').select('*').order('created_at', { ascending: true })
-    if (error) throw error
-    return (data || []).map(fromSnakeCase)
+    const data = await fetchAllRows(() =>
+      supabase.from('invoices').select('*').order('created_at', { ascending: true })
+    )
+    return data.map(fromSnakeCase)
   }
   return loadInvoices()
 }

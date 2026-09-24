@@ -1,5 +1,6 @@
 import { supabase, isSupabaseConfigured } from '../supabaseClient'
 import { toSnakeCase, fromSnakeCase } from '../lib/dbMappers'
+import { fetchAllRows } from '../lib/fetchAllRows'
 
 const STORAGE_KEY = 'etracking_keg_stock_entries'
 
@@ -28,9 +29,10 @@ function saveEntries(rows) {
 
 export async function fetchKegStockEntries() {
   if (isSupabaseConfigured()) {
-    const { data, error } = await supabase.from('keg_stock_entries').select('*').order('created_at', { ascending: true })
-    if (error) throw error
-    return (data || []).map(fromSnakeCase)
+    const data = await fetchAllRows(() =>
+      supabase.from('keg_stock_entries').select('*').order('created_at', { ascending: true })
+    )
+    return data.map(fromSnakeCase)
   }
   return loadEntries()
 }

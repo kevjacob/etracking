@@ -1,5 +1,6 @@
 import { supabase, isSupabaseConfigured } from '../supabaseClient'
 import { toSnakeCase, fromSnakeCase } from '../lib/dbMappers'
+import { fetchAllRows } from '../lib/fetchAllRows'
 
 const STORAGE_KEY = 'etracking_keg_movements'
 
@@ -35,9 +36,10 @@ function normalize(row) {
 
 export async function fetchKegMovements() {
   if (isSupabaseConfigured()) {
-    const { data, error } = await supabase.from('keg_movements').select('*').order('created_at', { ascending: true })
-    if (error) throw error
-    return (data || []).map((row) => normalize(fromSnakeCase(row)))
+    const data = await fetchAllRows(() =>
+      supabase.from('keg_movements').select('*').order('created_at', { ascending: true })
+    )
+    return data.map((row) => normalize(fromSnakeCase(row)))
   }
   return loadMovements().map(normalize)
 }

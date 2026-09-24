@@ -3,6 +3,7 @@
  */
 import { supabase, isSupabaseConfigured } from '../supabaseClient'
 import { toSnakeCase, fromSnakeCase } from '../lib/dbMappers'
+import { fetchAllRows } from '../lib/fetchAllRows'
 
 const STORAGE_KEY = 'etracking_status_history'
 
@@ -72,15 +73,16 @@ export async function fetchStatusHistory(filters = {}) {
   const { entityType, fromStatus, toStatus, dateFrom, dateTo } = filters
 
   if (isSupabaseConfigured()) {
-    let query = supabase.from('status_history').select('*').order('to_status_at', { ascending: false })
-    if (entityType) query = query.eq('entity_type', entityType)
-    if (fromStatus) query = query.eq('from_status', fromStatus)
-    if (toStatus) query = query.eq('to_status', toStatus)
-    if (dateFrom) query = query.gte('to_status_at', `${dateFrom}T00:00:00`)
-    if (dateTo) query = query.lte('to_status_at', `${dateTo}T23:59:59.999`)
-    const { data, error } = await query
-    if (error) throw error
-    return (data || []).map(fromSnakeCase)
+    const data = await fetchAllRows(() => {
+      let query = supabase.from('status_history').select('*').order('to_status_at', { ascending: false })
+      if (entityType) query = query.eq('entity_type', entityType)
+      if (fromStatus) query = query.eq('from_status', fromStatus)
+      if (toStatus) query = query.eq('to_status', toStatus)
+      if (dateFrom) query = query.gte('to_status_at', `${dateFrom}T00:00:00`)
+      if (dateTo) query = query.lte('to_status_at', `${dateTo}T23:59:59.999`)
+      return query
+    })
+    return data.map(fromSnakeCase)
   }
 
   let rows = loadHistory()
