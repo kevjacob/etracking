@@ -1,10 +1,13 @@
 import { useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { Upload } from 'lucide-react'
 import * as XLSX from 'xlsx'
 import { recordInitialStatus } from '../utils/recordStatusTransition'
 import { fetchInvoices, insertInvoice } from '../api/invoices'
 import { fetchInvoices as fetchAutocountInvoices, insertInvoice as insertAutocountInvoice } from '../api/autocountInvoices'
 import { fetchCreditNotes, insertCreditNote } from '../api/creditNotes'
+import { ALL_MONTHS_VALUE, getMonthKeyFromDate } from '../utils/trackingListFilters'
+import { toInputDate } from '../utils/dateFormat'
 
 function getTodayDateStr() {
   const d = new Date()
@@ -27,7 +30,15 @@ function findDocumentIdColumnIndex(headers) {
 function findDocNoColumnIndex(headers) {
   for (let i = 0; i < headers.length; i++) {
     const n = normalizeHeader(headers[i])
-    if (n === 'docno' || n === 'doc no' || n === 'document no' || n === 'document number') return i
+    if (
+      n === 'docno' ||
+      n === 'doc no' ||
+      n === 'document no' ||
+      n === 'document number' ||
+      n === 'invoice no' ||
+      n === 'invoice number' ||
+      n === 'invoiceno'
+    ) return i
   }
   return -1
 }
@@ -45,6 +56,49 @@ function findDocTypeColumnIndex(headers) {
     if (n === 'doctype' || n === 'doc type' || n === 'document type') return i
   }
   return -1
+}
+
+function findDateColumnIndex(headers) {
+  const exact = ['date of invoice', 'invoice date', 'doc date', 'document date', 'date']
+  for (let i = 0; i < headers.length; i++) {
+    const n = normalizeHeader(headers[i])
+    if (exact.includes(n)) return i
+  }
+  return -1
+}
+
+function excelDateToIso(value) {
+  if (value == null || value === '') return ''
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, '0')}-${String(value.getDate()).padStart(2, '0')}`
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    const parsed = XLSX.SSF.parse_date_code(value)
+    if (parsed?.y && parsed?.m && parsed?.d) {
+      return `${parsed.y}-${String(parsed.m).padStart(2, '0')}-${String(parsed.d).padStart(2, '0')}`
+    }
+  }
+  const s = String(value).trim()
+  if (!s) return ''
+  return toInputDate(s) || s
+}
+
+function monthKeyFromImportedRows(rows) {
+  const months = new Set()
+  for (const row of rows) {
+    const key = getMonthKeyFromDate(row.dateOfInvoice || row.creditNoteDate)
+    if (key) months.add(key)
+  }
+  if (months.size === 1) return [...months][0]
+  return ALL_MONTHS_VALUE
+}
+
+function storeFocusMonth(pageKey, monthKey) {
+  try {
+    sessionStorage.setItem(`etracking_focus_month_${pageKey}`, monthKey)
+  } catch {
+    /* ignore */
+  }
 }
 
 function normalizeDocType(value) {
@@ -241,6 +295,7 @@ export default function ImportDocumentPage() {
         return
       }
       const docTypeCol = findDocTypeColumnIndex(headers)
+      const dateCol = findDateColumnIndex(headers)
       const importDate = getTodayDateStr()
       const [existingEsd, existingAutocount, existingCN] = await Promise.all([
         fetchInvoices(),
@@ -257,30 +312,41 @@ export default function ImportDocumentPage() {
         if (!docId) continue
         const docTypeCell = docTypeCol >= 0 ? rows[r][docTypeCol] : ''
         const docType = classifyImportDocument(docId, docTypeCell)
+        const rowDate = dateCol >= 0 ? excelDateToIso(rows[r][dateCol]) : ''
+        const dateToUse = rowDate || importDate
         if (docType === 'autocount') {
           if (seenAutocount.has(docId)) {
             skipped.push({ documentId: docId, type: 'autocount' })
           } else {
             seenAutocount.add(docId)
-            toInsert.autocount.push({ documentId: docId, newRow: buildInvoiceRow(docId, importDate) })
+            toInsert.autocount.push({ documentId: docId, newRow: buildInvoiceRow(docId, dateToUse) })
           }
         } else if (docType === 'esd') {
           if (seenEsd.has(docId)) {
             skipped.push({ documentId: docId, type: 'esd' })
           } else {
             seenEsd.add(docId)
-            toInsert.esd.push({ documentId: docId, newRow: buildInvoiceRow(docId, importDate) })
+            toInsert.esd.push({ documentId: docId, newRow: buildInvoiceRow(docId, dateToUse) })
           }
         } else if (docType === 'creditNote') {
           if (seenCN.has(docId)) {
             skipped.push({ documentId: docId, type: 'creditNote' })
           } else {
             seenCN.add(docId)
-            toInsert.creditNote.push({ documentId: docId, newRow: buildCreditNoteRow(docId, importDate) })
+            toInsert.creditNote.push({ documentId: docId, newRow: buildCreditNoteRow(docId, dateToUse) })
           }
         }
       }
       const result = await runImport(toInsert)
+      if (result.invoicesCount > 0) {
+        storeFocusMonth('esd-invoices', monthKeyFromImportedRows(toInsert.esd.map((e) => e.newRow)))
+      }
+      if (result.autocountInvoicesCount > 0) {
+        storeFocusMonth('autocount-invoices', monthKeyFromImportedRows(toInsert.autocount.map((e) => e.newRow)))
+      }
+      if (result.creditNotesCount > 0) {
+        storeFocusMonth('credit-notes', monthKeyFromImportedRows(toInsert.creditNote.map((e) => e.newRow)))
+      }
       setImportResult({
         success: true,
         skippedCount: skipped.length,
@@ -303,7 +369,7 @@ export default function ImportDocumentPage() {
         <div className="px-5 py-3 border-b border-slate-200 bg-slate-50">
           <h2 className="text-lg font-semibold text-slate-800">Import Document</h2>
           <p className="text-slate-500 text-sm mt-1">
-            Upload an Excel (.xlsx, .xls) or CSV file with Document ID or DocNo, optional DocType (CN). IV/T → Autocount; numbers only → ESD. Existing document numbers are skipped (not overwritten).
+            Upload an Excel (.xlsx, .xls) or CSV file with Document ID or DocNo, optional DocType (CN), and optional invoice/doc date. IV/T → Autocount; numbers only → ESD. Existing document numbers are skipped (not overwritten).
           </p>
         </div>
         <div className="p-5">
@@ -351,6 +417,35 @@ export default function ImportDocumentPage() {
               {importResult.skippedIds?.length > 0 && (
                 <p className="text-xs text-amber-800">
                   Skipped: {importResult.skippedIds.join(', ')}{importResult.skippedCount > 20 ? ' …' : ''}
+                </p>
+              )}
+              {(importResult.invoicesCount > 0 || importResult.autocountInvoicesCount > 0 || importResult.creditNotesCount > 0) && (
+                <p className="text-xs mt-2">
+                  Imported documents use the file date when present, otherwise today. Open the tracking list, choose that month or <span className="font-medium">All months</span>, or search the document number.
+                  {importResult.invoicesCount > 0 && (
+                    <>
+                      {' '}
+                      <Link to="/etracking/invoice" className="underline font-medium">
+                        Open ESD Invoice Tracking
+                      </Link>
+                    </>
+                  )}
+                  {importResult.autocountInvoicesCount > 0 && (
+                    <>
+                      {' '}
+                      <Link to="/etracking/autocount-invoice" className="underline font-medium">
+                        Open Autocount Invoice Tracking
+                      </Link>
+                    </>
+                  )}
+                  {importResult.creditNotesCount > 0 && (
+                    <>
+                      {' '}
+                      <Link to="/etracking/credit-note" className="underline font-medium">
+                        Open Credit Note Tracking
+                      </Link>
+                    </>
+                  )}
                 </p>
               )}
             </div>

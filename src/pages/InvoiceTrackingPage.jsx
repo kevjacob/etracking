@@ -1411,7 +1411,7 @@ export default function InvoiceTrackingPage({ useAutocountStorage }) {
             type="text"
             value={invoiceSearchQuery}
             onChange={(e) => setInvoiceSearchQuery(e.target.value)}
-            placeholder="Search by invoice no."
+            placeholder="Search by invoice no. (all months)"
             className="py-2 px-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-900 focus:border-blue-900 w-48 max-w-full text-sm"
             aria-label="Search by invoice number"
           />
@@ -1617,7 +1617,7 @@ export default function InvoiceTrackingPage({ useAutocountStorage }) {
                   <td className="py-2 px-4 min-w-[7.5rem]">
                     <input
                       type="text"
-                      value={row.invoiceNo}
+                      value={row.invoiceNo ?? ''}
                       onChange={(e) => updateRow(row.id, { invoiceNo: e.target.value })}
                       readOnly={!canEditRow}
                       className={`w-full min-w-0 max-w-[120px] py-1.5 px-2 border rounded ${

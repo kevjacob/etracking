@@ -1,4 +1,4 @@
-import { formatMonthLabel } from '../utils/trackingListFilters'
+import { ALL_MONTHS_VALUE, formatMonthLabel } from '../utils/trackingListFilters'
 
 export default function TrackingMonthFilter({
   id,
@@ -23,11 +23,14 @@ export default function TrackingMonthFilter({
         {availableMonths.length === 0 ? (
           <option value="">No months</option>
         ) : (
-          availableMonths.map((monthKey) => (
-            <option key={monthKey} value={monthKey}>
-              {formatMonthLabel(monthKey)}
-            </option>
-          ))
+          <>
+            <option value={ALL_MONTHS_VALUE}>All months</option>
+            {availableMonths.map((monthKey) => (
+              <option key={monthKey} value={monthKey}>
+                {formatMonthLabel(monthKey)}
+              </option>
+            ))}
+          </>
         )}
       </select>
     </div>

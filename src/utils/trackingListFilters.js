@@ -1,6 +1,11 @@
 import { parseDate } from './dateFormat'
 
 export const TRACKING_PAGE_SIZE = 30
+export const ALL_MONTHS_VALUE = 'all'
+
+export function isSpecificMonth(monthKey) {
+  return Boolean(monthKey) && monthKey !== ALL_MONTHS_VALUE
+}
 
 export function getMonthKeyFromDate(dateStr) {
   if (!dateStr) return null
@@ -10,7 +15,7 @@ export function getMonthKeyFromDate(dateStr) {
 }
 
 export function formatMonthLabel(monthKey) {
-  if (!monthKey) return ''
+  if (!monthKey || monthKey === ALL_MONTHS_VALUE) return 'All months'
   const [year, month] = monthKey.split('-')
   const d = new Date(Number(year), Number(month) - 1, 1)
   if (isNaN(d.getTime())) return monthKey
