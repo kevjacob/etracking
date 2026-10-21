@@ -161,7 +161,7 @@ export default function InvoiceTrackingPage({ useAutocountStorage }) {
   const salesmen = employees.filter((e) => e.position === 'Salesman')
   const canUseTestMode = testMode && isSuperuser
   const invoiceNoCellClass = useAutocountStorage
-    ? 'tracking-serial-no-cell-wide'
+    ? 'tracking-serial-no-cell-autocount'
     : 'tracking-serial-no-cell'
   const [invoices, setInvoices] = useState([])
   const [invoicesLoading, setInvoicesLoading] = useState(true)
@@ -1462,7 +1462,16 @@ export default function InvoiceTrackingPage({ useAutocountStorage }) {
                   : 'No invoices added yet. Click "Add New Invoice" to add one.'}
           </div>
         ) : (
-        <table className="w-full min-w-[900px] text-sm">
+        <table className="w-full min-w-[900px] text-sm table-auto">
+          <colgroup>
+            <col className="w-12" />
+            <col className="w-12" />
+            {useAutocountStorage ? (
+              <col style={{ width: '14em', minWidth: '14em' }} />
+            ) : (
+              <col />
+            )}
+          </colgroup>
           <thead>
             <tr className="bg-slate-100 border-b border-slate-200">
               <th className="text-left py-3 px-4 font-semibold text-slate-700 w-12">
@@ -1479,7 +1488,7 @@ export default function InvoiceTrackingPage({ useAutocountStorage }) {
                 />
               </th>
               <th className="text-left py-3 px-4 font-semibold text-slate-700 w-12" title="Alert when status has exceeded allowed duration">Alert</th>
-              <th className={`text-left py-3 px-4 font-semibold text-slate-700 ${invoiceNoCellClass}`}>Invoice No</th>
+              <th className={`text-left py-3 px-2 pr-4 font-semibold text-slate-700 ${invoiceNoCellClass}`}>Invoice No</th>
               <th className="text-left py-3 px-4 font-semibold text-slate-700">Date of Invoice</th>
               <th className="text-left py-3 px-4 font-semibold text-slate-700">Status</th>
               <th className="text-left py-3 px-4 font-semibold text-slate-700">Assigned To</th>
@@ -1617,18 +1626,18 @@ export default function InvoiceTrackingPage({ useAutocountStorage }) {
                       <span className="text-slate-300" aria-hidden>–</span>
                     )}
                   </td>
-                  <td className={`py-2 px-4 ${invoiceNoCellClass}`}>
+                  <td className={`py-2 px-2 pr-4 ${invoiceNoCellClass} relative z-[1] bg-white`}>
                     {canEditRow ? (
                       <input
                         type="text"
                         value={row.invoiceNo ?? ''}
                         onChange={(e) => updateRow(row.id, { invoiceNo: e.target.value })}
-                        className="w-full min-w-[10rem] py-1.5 px-2 border border-slate-300 rounded focus:ring-2 focus:ring-blue-900 font-mono text-[13px]"
+                        className="w-full min-w-[14em] max-w-none py-1.5 px-2 border border-slate-300 rounded focus:ring-2 focus:ring-blue-900 font-mono text-[13px]"
                         style={{ boxSizing: 'border-box' }}
                       />
                     ) : (
                       <span
-                        className="py-1.5 px-2 block text-slate-700 font-mono text-[13px] tracking-tight"
+                        className="py-1.5 px-1 inline-block max-w-none text-slate-700 font-mono text-[13px] tracking-tight"
                         title={row.invoiceNo || undefined}
                       >
                         {row.invoiceNo || '–'}

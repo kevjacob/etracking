@@ -15,12 +15,24 @@
 /* Tracking tables: keep document / invoice numbers fully visible on small screens */
 @layer utilities {
   .tracking-serial-no-cell {
+    width: max-content;
     min-width: 7.5rem;
     white-space: nowrap;
+    overflow: visible;
   }
   .tracking-serial-no-cell-wide {
-    min-width: 12.5rem;
+    width: max-content;
+    min-width: 15.5rem;
     white-space: nowrap;
+    overflow: visible;
+  }
+  /* Autocount IV: "IV 8521052380" (IV + space + 10 digits) */
+  .tracking-serial-no-cell-autocount {
+    width: max-content;
+    min-width: 14em;
+    white-space: nowrap;
+    overflow: visible;
+    vertical-align: middle;
   }
 }
 

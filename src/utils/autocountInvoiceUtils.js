@@ -6,6 +6,9 @@ export const T_DIGIT_LEN = 5
 export const IV_PREFIX = 'IV'
 export const T_PREFIX = 'T'
 
+/** Imported Autocount IV rows often use "IV " + 10 digits (13 chars). Manual entry uses IV + 10 digits (12). */
+export const AUTOIV_INVOICE_NO_MAX_LEN = IV_PREFIX.length + 1 + IV_DIGIT_LEN
+
 export function formatIvNo(digits) {
   const d = normalizeDigits(digits, IV_DIGIT_LEN)
   if (d.length !== IV_DIGIT_LEN) return null
