@@ -4,6 +4,7 @@
 import { supabase, isSupabaseConfigured } from '../supabaseClient'
 import { toSnakeCase, fromSnakeCase } from '../lib/dbMappers'
 import { fetchAllRows } from '../lib/fetchAllRows'
+import { isUniqueViolation } from '../lib/dbErrors'
 
 const STORAGE_KEY = 'etracking_invoices'
 
@@ -45,7 +46,13 @@ export async function insertInvoice(row) {
     const { id, cod, ...rest } = row
     const payload = toSnakeCase(rest)
     const { data, error } = await supabase.from('invoices').insert(payload).select('*').single()
-    if (error) throw error
+    if (error) {
+      if (isUniqueViolation(error) && rest.invoiceNo) {
+        const existing = await supabase.from('invoices').select('*').eq('invoice_no', rest.invoiceNo).maybeSingle()
+        if (existing.data) return fromSnakeCase(existing.data)
+      }
+      throw error
+    }
     return fromSnakeCase(data)
   }
   const invoices = loadInvoices()

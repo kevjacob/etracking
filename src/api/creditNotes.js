@@ -4,6 +4,7 @@
 import { supabase, isSupabaseConfigured } from '../supabaseClient'
 import { toSnakeCase, fromSnakeCase } from '../lib/dbMappers'
 import { fetchAllRows } from '../lib/fetchAllRows'
+import { isUniqueViolation } from '../lib/dbErrors'
 
 const STORAGE_KEY = 'etracking_credit_notes'
 
@@ -45,7 +46,13 @@ export async function insertCreditNote(row) {
     const { id, ...rest } = row
     const payload = toSnakeCase(rest)
     const { data, error } = await supabase.from('credit_notes').insert(payload).select('*').single()
-    if (error) throw error
+    if (error) {
+      if (isUniqueViolation(error) && rest.creditNoteNo) {
+        const existing = await supabase.from('credit_notes').select('*').eq('credit_note_no', rest.creditNoteNo).maybeSingle()
+        if (existing.data) return fromSnakeCase(existing.data)
+      }
+      throw error
+    }
     return fromSnakeCase(data)
   }
   const rows = loadCreditNotes()

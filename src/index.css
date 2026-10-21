@@ -12,6 +12,18 @@
   animation: row-highlight 1s ease-in-out;
 }
 
+/* Tracking tables: keep document / invoice numbers fully visible on small screens */
+@layer utilities {
+  .tracking-serial-no-cell {
+    min-width: 7.5rem;
+    white-space: nowrap;
+  }
+  .tracking-serial-no-cell-wide {
+    min-width: 12.5rem;
+    white-space: nowrap;
+  }
+}
+
 @keyframes chat-unread-pulse {
   0%, 100% { opacity: 1; background-color: rgb(234 88 12); }
   50% { opacity: 0.85; background-color: rgb(249 115 22); }

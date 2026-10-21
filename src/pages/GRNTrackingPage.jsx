@@ -1589,7 +1589,7 @@ export default function GRNTrackingPage() {
                 />
               </th>
               <th className="text-left py-3 px-4 font-semibold text-slate-700 w-12" title="Alert when status has exceeded allowed duration">Alert</th>
-              <th className="text-left py-3 px-4 font-semibold text-slate-700">GRN No</th>
+              <th className="text-left py-3 px-4 font-semibold text-slate-700 tracking-serial-no-cell">GRN No</th>
               <th className="text-left py-3 px-4 font-semibold text-slate-700">GRN Date</th>
               <th className="text-left py-3 px-4 font-semibold text-slate-700">Status</th>
               <th className="text-left py-3 px-4 font-semibold text-slate-700">Assigned To</th>
@@ -1726,8 +1726,11 @@ export default function GRNTrackingPage() {
                       <span className="text-slate-300" aria-hidden>–</span>
                     )}
                   </td>
-                  <td className="py-2 px-4">
-                    <span className="py-1.5 px-2 block text-slate-700">
+                  <td className="py-2 px-4 tracking-serial-no-cell">
+                    <span
+                      className="py-1.5 px-2 block text-slate-700 font-mono text-[13px] tracking-tight"
+                      title={row.grnNo || undefined}
+                    >
                       {row.grnNo || '–'}
                     </span>
                   </td>

@@ -1317,7 +1317,7 @@ export default function CreditNoteTrackingPage() {
                   aria-label="Select all credit notes"
                 />
               </th>
-              <th className="text-left py-3 px-4 font-semibold text-slate-700">Credit Note No</th>
+              <th className="text-left py-3 px-4 font-semibold text-slate-700 tracking-serial-no-cell-wide">Credit Note No</th>
               <th className="text-left py-3 px-4 font-semibold text-slate-700">Credit Note Date</th>
               <th className="text-left py-3 px-4 font-semibold text-slate-700">Status</th>
               <th className="text-left py-3 px-4 font-semibold text-slate-700">Assigned To</th>
@@ -1446,8 +1446,11 @@ export default function CreditNoteTrackingPage() {
                       aria-label={`Select credit note ${row.creditNoteNo || row.id}`}
                     />
                   </td>
-                  <td className="py-2 px-4">
-                    <span className="py-1.5 px-2 block text-slate-700">
+                  <td className="py-2 px-4 tracking-serial-no-cell-wide">
+                    <span
+                      className="py-1.5 px-2 block text-slate-700 font-mono text-[13px] tracking-tight"
+                      title={row.creditNoteNo || undefined}
+                    >
                       {row.creditNoteNo || '–'}
                     </span>
                   </td>

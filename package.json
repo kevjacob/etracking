@@ -9,7 +9,9 @@
     "preview": "vite preview",
     "backup": "node scripts/backup-to-remote.js",
     "backup:mirror": "node scripts/backup-to-remote.js --mirror",
-    "backup:daemon": "node scripts/run-backup-daemon.js"
+    "backup:daemon": "node scripts/run-backup-daemon.js",
+    "dedupe": "node scripts/dedupe-documents.js",
+    "dedupe:apply": "node scripts/dedupe-documents.js --apply"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",

@@ -160,6 +160,9 @@ export default function InvoiceTrackingPage({ useAutocountStorage }) {
   const drivers = employees.filter((e) => e.position === 'Lorry Driver')
   const salesmen = employees.filter((e) => e.position === 'Salesman')
   const canUseTestMode = testMode && isSuperuser
+  const invoiceNoCellClass = useAutocountStorage
+    ? 'tracking-serial-no-cell-wide'
+    : 'tracking-serial-no-cell'
   const [invoices, setInvoices] = useState([])
   const [invoicesLoading, setInvoicesLoading] = useState(true)
   const [linkedGrns, setLinkedGrns] = useState([])
@@ -1476,7 +1479,7 @@ export default function InvoiceTrackingPage({ useAutocountStorage }) {
                 />
               </th>
               <th className="text-left py-3 px-4 font-semibold text-slate-700 w-12" title="Alert when status has exceeded allowed duration">Alert</th>
-              <th className="text-left py-3 px-4 font-semibold text-slate-700 min-w-[7.5rem]">Invoice No</th>
+              <th className={`text-left py-3 px-4 font-semibold text-slate-700 ${invoiceNoCellClass}`}>Invoice No</th>
               <th className="text-left py-3 px-4 font-semibold text-slate-700">Date of Invoice</th>
               <th className="text-left py-3 px-4 font-semibold text-slate-700">Status</th>
               <th className="text-left py-3 px-4 font-semibold text-slate-700">Assigned To</th>
@@ -1614,19 +1617,23 @@ export default function InvoiceTrackingPage({ useAutocountStorage }) {
                       <span className="text-slate-300" aria-hidden>–</span>
                     )}
                   </td>
-                  <td className="py-2 px-4 min-w-[7.5rem]">
-                    <input
-                      type="text"
-                      value={row.invoiceNo ?? ''}
-                      onChange={(e) => updateRow(row.id, { invoiceNo: e.target.value })}
-                      readOnly={!canEditRow}
-                      className={`w-full min-w-0 max-w-[120px] py-1.5 px-2 border rounded ${
-                        canEditRow
-                          ? 'border-slate-300 focus:ring-2 focus:ring-blue-900'
-                          : 'border-transparent bg-transparent read-only:bg-transparent'
-                      }`}
-                      style={{ boxSizing: 'border-box' }}
-                    />
+                  <td className={`py-2 px-4 ${invoiceNoCellClass}`}>
+                    {canEditRow ? (
+                      <input
+                        type="text"
+                        value={row.invoiceNo ?? ''}
+                        onChange={(e) => updateRow(row.id, { invoiceNo: e.target.value })}
+                        className="w-full min-w-[10rem] py-1.5 px-2 border border-slate-300 rounded focus:ring-2 focus:ring-blue-900 font-mono text-[13px]"
+                        style={{ boxSizing: 'border-box' }}
+                      />
+                    ) : (
+                      <span
+                        className="py-1.5 px-2 block text-slate-700 font-mono text-[13px] tracking-tight"
+                        title={row.invoiceNo || undefined}
+                      >
+                        {row.invoiceNo || '–'}
+                      </span>
+                    )}
                   </td>
                   <td className="py-2 px-4">
                     {canEditRow ? (
