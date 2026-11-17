@@ -53,11 +53,19 @@ export async function insertStatusHistory(entry) {
     fromStatusAt,
     toStatusAt,
     daysElapsed: calcDaysElapsed(fromStatusAt, toStatusAt),
+    editedBy: String(entry.editedBy || '').trim(),
   }
 
   if (isSupabaseConfigured()) {
     const payload = toSnakeCase(row)
-    const { data, error } = await supabase.from('status_history').insert(payload).select('*').single()
+    let { data, error } = await supabase.from('status_history').insert(payload).select('*').single()
+    if (error && isMissingEditedByColumn(error)) {
+      const withoutEditor = { ...payload }
+      delete withoutEditor.edited_by
+      const retry = await supabase.from('status_history').insert(withoutEditor).select('*').single()
+      data = retry.data
+      error = retry.error
+    }
     if (error) throw error
     return fromSnakeCase(data)
   }
@@ -67,6 +75,38 @@ export async function insertStatusHistory(entry) {
   rows.push(saved)
   saveHistory(rows)
   return saved
+}
+
+function isMissingEditedByColumn(error) {
+  const msg = `${error?.message || ''} ${error?.details || ''} ${error?.hint || ''}`
+  return /edited_by/i.test(msg)
+}
+
+/** Status updates for one document, oldest first. */
+export async function fetchStatusHistoryForEntity(entityType, entityId) {
+  const id = String(entityId ?? '')
+  if (!entityType || !id) return []
+
+  if (isSupabaseConfigured()) {
+    const { data, error } = await supabase
+      .from('status_history')
+      .select('*')
+      .eq('entity_type', entityType)
+      .eq('entity_id', id)
+      .order('to_status_at', { ascending: true })
+      .order('created_at', { ascending: true })
+    if (error) throw error
+    return (data || []).map(fromSnakeCase)
+  }
+
+  return loadHistory()
+    .filter((r) => r.entityType === entityType && String(r.entityId) === id)
+    .sort((a, b) => {
+      const ta = new Date(a.toStatusAt).getTime()
+      const tb = new Date(b.toStatusAt).getTime()
+      if (ta !== tb) return ta - tb
+      return new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime()
+    })
 }
 
 export async function fetchStatusHistory(filters = {}) {

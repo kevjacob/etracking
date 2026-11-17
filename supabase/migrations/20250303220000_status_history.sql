@@ -9,6 +9,7 @@ create table if not exists public.status_history (
   from_status_at timestamptz not null,
   to_status_at timestamptz not null,
   days_elapsed integer not null default 0,
+  edited_by text not null default '',
   created_at timestamptz default now()
 );
 
@@ -23,5 +24,8 @@ alter table public.status_history enable row level security;
 drop policy if exists "Allow all for anon" on public.status_history;
 create policy "Allow all for anon"
   on public.status_history for all to anon using (true) with check (true);
+
+alter table public.status_history
+  add column if not exists edited_by text not null default '';
 
 notify pgrst, 'reload schema';

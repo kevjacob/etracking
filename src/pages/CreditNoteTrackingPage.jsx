@@ -21,6 +21,7 @@ import AssignedToCell from '../components/AssignedToCell'
 import ReassignAssigneeModal, { reassignAssigneeUpdates } from '../components/ReassignAssigneeModal'
 import ReassignAssignedDateModal, { reassignDateUpdates } from '../components/ReassignAssignedDateModal'
 import NoticeModal from '../components/NoticeModal'
+import StatusWithHistory from '../components/StatusWithHistory'
 import RefreshListButton from '../components/RefreshListButton'
 import TrackingMonthFilter from '../components/TrackingMonthFilter'
 import TrackingPagination from '../components/TrackingPagination'
@@ -1460,27 +1461,29 @@ export default function CreditNoteTrackingPage() {
                     </span>
                   </td>
                   <td className="py-2 px-4">
-                    {isCompletedLocked ? (
-                      <span className="py-1.5 px-2 block min-w-[180px] text-slate-700">
-                        {row.status}
-                      </span>
-                    ) : (
-                      <div className="min-w-[180px]">
-                        <select
-                          value={row.status}
-                          onChange={(e) =>
-                            handleStatusChange(row.id, e.target.value, row.status)
-                          }
-                          className="w-full py-1.5 px-2 border border-slate-300 rounded focus:ring-2 focus:ring-blue-900"
-                        >
-                          {STATUS_OPTIONS.map((opt) => (
-                            <option key={opt} value={opt}>
-                              {opt}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-                    )}
+                    <StatusWithHistory entityType="credit_note" entityId={row.id}>
+                      {isCompletedLocked ? (
+                        <span className="py-1.5 px-2 block min-w-[180px] text-slate-700">
+                          {row.status}
+                        </span>
+                      ) : (
+                        <div className="min-w-[180px]">
+                          <select
+                            value={row.status}
+                            onChange={(e) =>
+                              handleStatusChange(row.id, e.target.value, row.status)
+                            }
+                            className="w-full py-1.5 px-2 border border-slate-300 rounded focus:ring-2 focus:ring-blue-900"
+                          >
+                            {STATUS_OPTIONS.map((opt) => (
+                              <option key={opt} value={opt}>
+                                {opt}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      )}
+                    </StatusWithHistory>
                   </td>
                   <td className="py-2 px-4">
                     <AssignedToCell

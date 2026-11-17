@@ -45,6 +45,7 @@ const SNAKE_MAP = {
   fromStatusAt: 'from_status_at',
   toStatusAt: 'to_status_at',
   daysElapsed: 'days_elapsed',
+  editedBy: 'edited_by',
   docNo: 'doc_no',
   entryDate: 'entry_date',
   movementType: 'movement_type',

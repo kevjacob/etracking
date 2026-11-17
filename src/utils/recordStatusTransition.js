@@ -1,5 +1,18 @@
 import { insertStatusHistory } from '../api/statusHistory'
 
+const USER_STORAGE_KEY = 'etracking_user'
+
+function currentEditorName() {
+  try {
+    const raw = localStorage.getItem(USER_STORAGE_KEY)
+    if (!raw) return ''
+    const user = JSON.parse(raw)
+    return String(user?.name || user?.username || '').trim()
+  } catch {
+    return ''
+  }
+}
+
 /**
  * Log a workflow status change for Lead Time Aging Report.
  * @param {object} prevRow - row before update (must have status, statusUpdatedAt, id)
@@ -19,6 +32,7 @@ export function recordStatusTransition(prevRow, nextStatus, meta) {
     toStatus: nextStatus,
     fromStatusAt,
     toStatusAt,
+    editedBy: currentEditorName(),
   }).catch((e) => console.error('Status history log error:', e))
 }
 
@@ -33,5 +47,6 @@ export function recordInitialStatus({ entityType, entityId, documentNo, status, 
     toStatus: status,
     fromStatusAt: at,
     toStatusAt: at,
+    editedBy: currentEditorName(),
   }).catch((e) => console.error('Status history initial log error:', e))
 }
